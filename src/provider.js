@@ -1,0 +1,79 @@
+// provider.js: OpenAI-compatible chat + model listing. Timeout and cancellation built in.
+
+const HTTP_TIMEOUT = 120_000;
+
+async function request(url, opts, signal) {
+  const ctrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, HTTP_TIMEOUT);
+  const relay = () => ctrl.abort();
+  signal?.addEventListener('abort', relay, { once: true });
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (err) {
+    if (signal?.aborted) { const e = new Error('stopped by user'); e.stopped = true; throw e; }
+    if (timedOut) throw new Error('request timed out after 120s');
+    throw new Error(`cannot reach ${url}: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', relay);
+  }
+}
+
+export async function fetchModels(cfg, signal) {
+  const headers = { accept: 'application/json' };
+  if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
+  const res = await request(`${cfg.baseUrl}/models`, { headers }, signal);
+  if (!res.ok) throw new Error(`HTTP ${res.status} on GET /models`);
+  const data = await res.json();
+  const ids = (data.data ?? []).map(m => m.id).filter(Boolean);
+  return [...new Set(ids)];
+}
+
+export async function chat(cfg, messages, tools, signal) {
+  const body = { model: cfg.model, messages, temperature: 0.2 };
+  if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
+  if (tools?.length) body.tools = tools.map(t => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: t.parameters }
+  }));
+  const headers = { 'content-type': 'application/json' };
+  if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
+
+  // transient failures (network errors, 429, 5xx) get retries with backoff; other HTTP answers do not
+  const ATTEMPTS = 4;
+  let res;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    let threw = null;
+    try {
+      res = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
+    } catch (err) {
+      threw = err;
+    }
+    const retryable = threw || [429, 500, 502, 503, 504].includes(res?.status);
+    if (!retryable || attempt === ATTEMPTS || signal?.aborted) {
+      if (threw) throw threw;
+      break;
+    }
+    if (threw || res) {
+      const delay = Math.min(15_000, 1500 * attempt * attempt);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    // provider does not know reasoning_effort: retry once without it
+    if (body.reasoning_effort && (res.status === 400 || res.status === 422)) {
+      delete body.reasoning_effort;
+      const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
+      if (!retry.ok) throw new Error(`HTTP ${retry.status}: ${(await retry.text()).slice(0, 200)}`);
+      return parseMessage(await retry.json());
+    }
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return parseMessage(await res.json());
+}
+
+function parseMessage(json) {
+  return json.choices?.[0]?.message ?? { role: 'assistant', content: '', tool_calls: [] };
+}

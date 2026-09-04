@@ -1,0 +1,45 @@
+{
+  "name": "ineedcodes",
+  "version": "1.0.2",
+  "description": "Your terminal, now autonomous. Just say what you want, ineed does the rest.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "ineed": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs && node test/pack.mjs"
+  },
+  "author": {
+    "name": "0xyas",
+    "email": "arkhanalghozali18@gmail.com",
+    "url": "https://ineed.codes"
+  },
+  "homepage": "https://ineed.codes",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/salsabila2507/ineedcodes.git"
+  },
+  "bugs": {
+    "url": "https://github.com/salsabila2507/ineedcodes/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "terminal",
+    "autonomous",
+    "coding",
+    "vibecoding",
+    "llm",
+    "openai-compatible"
+  ]
+}

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="240" viewBox="0 0 720 240" role="img" aria-label="ineed: your terminal, now autonomous">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#101a2e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2ea043"/>
+      <stop offset="1" stop-color="#56d364"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="720" height="240" rx="20" fill="url(#bg)"/>
+  <rect x="1.5" y="1.5" width="717" height="237" rx="18.5" fill="none" stroke="#1f2a44" stroke-width="3"/>
+
+  <circle cx="44" cy="46" r="7" fill="#ff5f57"/>
+  <circle cx="68" cy="46" r="7" fill="#febc2e"/>
+  <circle cx="92" cy="46" r="7" fill="#28c840"/>
+  <text x="360" y="51" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#6e7a93">~/my-project $ ineed</text>
+  <line x1="24" y1="66" x2="696" y2="66" stroke="#1f2a44" stroke-width="2"/>
+
+  <text x="196" y="142" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="62" font-weight="700" fill="url(#accent)">&#10095; ineed</text>
+  <rect x="482" y="96" width="24" height="48" rx="3" fill="#56d364"/>
+
+  <text x="360" y="202" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21" fill="#8b949e">your terminal, now autonomous</text>
+</svg>
