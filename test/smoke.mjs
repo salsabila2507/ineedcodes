@@ -135,6 +135,34 @@ function mock(script) {
           } else resp = reply(joined.includes('ECHO:hello-mcp') ? 'MCP-VERIFIED' : 'MCP-BROKEN');
           break;
         }
+        case 'humanize': {
+          // the humanizer model pass sends a prompt containing 'AI cliches'; echo the prose back unchanged
+          const prompt = msgs[msgs.length - 1]?.content ?? '';
+          if (String(prompt).includes('AI cliches')) {
+            const text = String(prompt).split('---\n')[1] ?? prompt;
+            resp = reply(text.trim());
+          } else if (!hadTools) {
+            resp = call('write_file', { path: 'index.html', content: '<!DOCTYPE html>\n<html lang="id"><head><meta charset="utf-8"><title>Produk Kami</title></head><body><h1 class="hero">Selamat datang</h1><p>We are a cutting-edge, game-changing company that will unlock your full potential.</p></body></html>' });
+          } else resp = reply('HUMANIZE-FLOW-DONE');
+          break;
+        }
+        case 'humanizeoff': {
+          if (!hadTools) resp = call('write_file', { path: 'post.md', content: '# Post\n\nWe are a cutting-edge, game-changing platform that will unlock your full potential today.' });
+          else resp = reply('HUMANIZE-OFF-DONE');
+          break;
+        }
+        case 'humanizeskip': {
+          if (!hadTools) resp = call('write_file', { path: 'app.js', content: '// We are a cutting-edge, game-changing module that will unlock your full potential.\nexport const x = 1;\n' });
+          else resp = reply('HUMANIZE-SKIP-DONE');
+          break;
+        }
+        case 'steer': {
+          const hasSteer = msgs.some(m => m.role === 'user' && String(m.content).includes('steer from the user'));
+          if (!hadTools) resp = call('shell', { command: 'echo step-one' });
+          else if (!hasSteer) resp = call('shell', { command: 'echo step-two' });
+          else resp = reply(joined.includes('step-one') ? 'STEER-SEEN' : 'STEER-BROKEN');
+          break;
+        }
         default: resp = reply('OK');
       }
       send(200, resp);
@@ -143,7 +171,7 @@ function mock(script) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })));
 }
 
-function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false } = {}) {
+function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null } = {}) {
   return new Promise(resolve => {
     const extraPath = fakePath ? fakePath + path.delimiter + process.env.PATH : process.env.PATH;
     const child = spawn(process.execPath, [CLI, ...args], {
@@ -167,7 +195,9 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
     child.stderr.on('data', c => out += c);
     const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
     child.on('close', code => { clearTimeout(timer); resolve({ code, out }); });
-    if (staged) {
+    if (autoExitMs !== null) {
+      setTimeout(() => child.stdin.write('/exit\n'), autoExitMs);
+    } else if (staged) {
       if (staged[0] && staged[0].immediate) { child.stdin.write(staged[0].send + '\n'); step = 1; }
     } else {
       child.stdin.end(input);
@@ -176,7 +206,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.1.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.2.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -336,7 +366,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.1.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.2.0'), out);
   server.close();
 }
 
@@ -468,6 +498,54 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
   const { code, out } = await run([], { input: '/exit\n', fresh: true });
   check('session: fresh welcome with examples and helpers', out.includes('Welcome to ineed!') && out.includes('landing page') && out.includes('/perm'), out);
+  server.close();
+}
+
+// ── humanizer: prose files get cleaned, code files untouched, toggle works ──
+{
+  const { code, out, work } = await oneShot('humanize', 'make an index.html landing page');
+  const file = path.join(work, 'index.html');
+  const html = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  const clean = html.includes('new,') || !html.includes('cutting-edge');
+  check('humanizer: cliches removed from html copy', code === 0 && html.includes('<h1 class="hero">') && clean && html.includes('Selamat datang'), out.slice(-300) + ' | html: ' + html.slice(0, 200));
+}
+{
+  const { code, out, work } = await oneShot('humanizeoff', 'make a post.md', { humanize: false });
+  const md = fs.existsSync(path.join(work, 'post.md')) ? fs.readFileSync(path.join(work, 'post.md'), 'utf8') : '';
+  check('humanizer: off keeps text as written', code === 0 && md.includes('cutting-edge'), out.slice(-200));
+}
+{
+  const { code, out, work } = await oneShot('humanizeskip', 'make app.js');
+  const js = fs.existsSync(path.join(work, 'app.js')) ? fs.readFileSync(path.join(work, 'app.js'), 'utf8') : '';
+  check('humanizer: code files never touched', code === 0 && js.includes('cutting-edge') && js.includes('export const x = 1;'), out.slice(-200));
+}
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { input: '/humanizer\n/humanizer off\n/exit\n' });
+  check('session: /humanizer status + toggle', out.includes('Humanizer') && out.includes('Humanizer: off'), out.slice(-300));
+  server.close();
+}
+
+// ── steering: text typed mid-task reaches the running conversation ──
+{
+  const { server, port } = await mock('steer');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow' }), { mode: 0o600 });
+  const work = fs.mkdtempSync(path.join(TMP, 'steer-'));
+  const { code, out } = await run([], {
+    cwd: work,
+    autoExitMs: 12_000,
+    staged: [
+      { when: '', send: 'run the steps', immediate: true },
+      { when: 'step-one', send: 'focus on alpha now' },
+      { when: 'step-two', send: 'focus on alpha now' },
+      { when: 'step-two', send: 'focus on alpha now' },
+      { when: 'STEER-SEEN', send: '' }
+    ]
+  });
+  check('steering: mid-task note reaches the agent', code === 0 && out.includes('STEER-SEEN') && out.includes('steer:'), out.slice(-400));
   server.close();
 }
 

@@ -42,6 +42,7 @@ export async function startSession(cfg, { fresh = false } = {}) {
   let closed = false;
   const approved = new Set(); // session-wide "always allow" grants
   const pendingLines = [];
+  const steerQueue = [];      // notes typed while a task runs, injected mid-task
 
   const TUI = process.stdout.isTTY && !process.env.NO_COLOR;
 
@@ -104,11 +105,22 @@ export async function startSession(cfg, { fresh = false } = {}) {
         onAgentEnd: (id, r) => { stopSpinner(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
         onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
         onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
+        onNote: note => { stopSpinner(); say(dim('  ◇ ' + note)); },
+        drainSteer: () => steerQueue.splice(0),
+        onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
         onApprove: async (cat, name, input2) => {
           stopSpinner();
           say(yellow('  ⚠ approval needed') + ' ' + cyan(name) + gray(' ' + trunc(JSON.stringify(input2), 80)));
-          const a = await ask('     [y] once · [a] always for ' + cat + ' · [n] no: ');
+          const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
           const c = a.trim().toLowerCase();
+          if (c === 's' || c === 'save') {
+            approved.add(cat);
+            if (cat === 'edit') Object.assign(state, normalize({ ...state, permEdit: 'allow' }));
+            if (cat === 'shell') Object.assign(state, normalize({ ...state, permShell: 'allow' }));
+            saveConfig(state);
+            say(dim('     always allowed, saved to config. /perm safe to undo.'));
+            return 'always';
+          }
           if (c === 'a' || c === 'always') { approved.add(cat); say(dim('     always allowed for this session.')); return 'always'; }
           if (c === 'y' || c === 'yes') return true;
           say(dim('     denied.'));
@@ -143,6 +155,8 @@ export async function startSession(cfg, { fresh = false } = {}) {
 
   async function afterTask() {
     if (closed) return;
+    // notes typed near the end that never reached the model become follow-up tasks
+    if (steerQueue.length) pendingLines.unshift(...steerQueue.splice(0));
     if (TUI) { drawStatus(); scrollRegion(); return; }
     plainPrompt();
     while (!busy && !closed) {
@@ -162,9 +176,12 @@ export async function startSession(cfg, { fresh = false } = {}) {
       say('  ' + cyan('/config') + '   show provider config (key hidden)');
       say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
+      say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
       say('  ' + cyan('/clear') + '    forget this conversation');
       say('  ' + cyan('/setup') + '    redo provider setup');
       say('  ' + cyan('/reset') + '    clear saved config');
+      say('  ' + cyan('/help') + '     this list. Type normally to work, steer mid-task anytime');
+      say(dim('  while a task runs: your text is a live steer, /stop cancels it'));
       say('  ' + cyan('/exit') + '     quit');
     },
     '/config': () => {
@@ -185,7 +202,12 @@ export async function startSession(cfg, { fresh = false } = {}) {
 
   async function handle(input) {
     if (!input) return;
-    if (busy) { pendingLines.push(input); return; }
+    if (busy) {
+      if (input === '/stop') { activeRun?.abort(); say(dim('  (stopping...')); return; }
+      if (input.startsWith('/')) { pendingLines.push(input); return; }
+      steerQueue.push(input);
+      return;
+    }
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
     if (input === '/help' || input === '?') return commands['/help']();
     if (input === '/config') return commands['/config']();
@@ -246,6 +268,24 @@ export async function startSession(cfg, { fresh = false } = {}) {
       say(ok ? green('Memory: on') + dim(` via ${provider.name}.`) : yellow('Memory: provider not installed.') + dim(' Install icm to enable.'));
       busy = false;
       return afterTask();
+    }
+    if (input === '/humanizer' || input.startsWith('/humanizer ')) {
+      const arg = input.split(/\s+/)[1];
+      if (arg === 'on' || arg === 'off') {
+        Object.assign(state, normalize({ ...state, humanize: arg === 'on' }));
+        saveConfig(state);
+        say(arg === 'on'
+          ? green('Humanizer: on') + dim(' - web pages and posts get a natural-writing pass after they are written.')
+          : yellow('Humanizer: off') + dim(' - files are written exactly as the model produces them.'));
+        return;
+      }
+      say(box([
+        bold('Humanizer') + dim('  ' + (state.humanize === false ? 'off' : 'on')),
+        dim('scope') + '      .html .htm .md .txt (web pages, posts, docs)',
+        dim('never touches') + '  code, tags, attributes, URLs, JSON, technical values',
+        dim('toggle') + '      /humanizer on | /humanizer off'
+      ]));
+      return;
     }
     if (input === '/mcp' || input === '/mcp reload') {
       if (!mcpConfigured()) {

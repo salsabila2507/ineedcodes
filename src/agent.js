@@ -4,6 +4,7 @@ import { chat } from './provider.js';
 import { TOOLS, runTool, shellRun, isDestructive } from './tools.js';
 import { trunc, gray, cyan, dim } from './ui.js';
 import { getMemoryProvider } from './memory.js';
+import * as path from 'node:path';
 
 export const MAX_STEPS = 30;
 export const MAX_HISTORY_CHARS = 30_000;
@@ -17,6 +18,8 @@ Rules:
 - Destructive commands are always blocked. Ask the user to run those themselves.
 - Some actions need user approval. A tool result starting with "Denied" means the user said no: do not retry the same call, explain what you wanted instead.
 - For objectives with 3 or more steps, keep a checklist with the todo tool and update statuses as you go (in_progress for what you are doing now).
+- A "[steer from the user, newer than the objective]" message is a live steer: it is newer than the original objective. Adapt to it immediately; if it changes direction, change course without redoing finished work.
+- When building web pages or UI: commit to one coherent style; restrained palette (1 primary, 1 accent, neutral background); a real Google Fonts pairing; no emoji as icons (use inline SVG); cursor-pointer on clickables; visible focus states; text contrast at least 4.5:1; responsive at 375, 768, 1024, 1440px; respect prefers-reduced-motion; avoid generic AI purple/pink gradients and default template blue.
 - When the objective is done, verify it (run the tests, read the file back, whatever proves it), then reply with the final result in this shape:
   What changed, what you ran, the evidence you saw.`;
 
@@ -155,6 +158,16 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       if (ctrl.signal.aborted) break;
+      // steering: notes typed while the task runs join the conversation here
+      if (hooks.drainSteer) {
+        const steer = hooks.drainSteer();
+        if (steer.length) {
+          for (const s of steer) {
+            messages.push({ role: 'user', content: `[steer from the user, newer than the objective] ${s}` });
+          }
+          hooks.onSteer?.(steer);
+        }
+      }
       let msg;
       try {
         hooks.onThinkingStart?.();
@@ -259,6 +272,15 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             if (allowedNow && !plan && isEdit
               && !/^(Refused|Error|Denied)/.test(String(result.output))) {
               changed.add(String(input.path ?? ''));
+              // humanizer pass: prose files only (html/md/txt), code never touched (rule 21)
+              if (name === 'write_file' && cfg.humanize !== false) {
+                const abs = path.resolve(cwd, String(input.path ?? ''));
+                try {
+                  const { humanizeFile } = await import('./humanize.js');
+                  const hr = await humanizeFile(cfg, abs, ctrl.signal, { skipModel: false });
+                  if (hr.changed) hooks.onNote?.(`humanized copy in ${String(input.path)}`);
+                } catch {}
+              }
             }
           }
         }

@@ -25,6 +25,7 @@ export function normalize(c) {
     mode: c.mode === 'plan' ? 'plan' : 'build',
     memory: c.memory !== false,
     mcp: c.mcp !== false,
+    humanize: c.humanize !== false,
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
     permShell: c.permShell === 'allow' ? 'allow' : 'ask'
   };
