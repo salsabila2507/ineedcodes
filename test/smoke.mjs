@@ -110,6 +110,31 @@ function mock(script) {
           else if (toolResults.length === 1) resp = call('todo', { todos: [{ content: 'scaffold', status: 'completed' }, { content: 'style it', status: 'completed' }, { content: 'test it', status: 'completed' }] });
           else resp = reply('TODO-FINISHED');
           break;
+        case 'agent': {
+          const isWorker = String(msgs[0]?.content ?? '').includes('worker) spawned by the lead agent');
+          if (isWorker) resp = reply(String(msgs[msgs.length - 1].content).includes('alpha') ? 'ALPHA-FACTS-FOUND' : 'BETA-FACTS-FOUND');
+          else if (hadTools) resp = reply(joined.includes('ALPHA-FACTS-FOUND') && joined.includes('BETA-FACTS-FOUND') ? 'AGENTS-PARALLEL-VERIFIED' : 'AGENTS-BROKEN');
+          else resp = { choices: [{ message: { role: 'assistant', content: null, tool_calls: [
+            { id: 's1', type: 'function', function: { name: 'spawn_agent', arguments: JSON.stringify({ role: 'research', objective: 'investigate alpha' }) } },
+            { id: 's2', type: 'function', function: { name: 'spawn_agent', arguments: JSON.stringify({ role: 'research', objective: 'investigate beta' }) } }
+          ] } }] };
+          break;
+        }
+        case 'agentwrite': {
+          const isWorker = String(msgs[0]?.content ?? '').includes('worker) spawned by the lead agent');
+          if (isWorker) resp = hadTools ? reply('IMPL-WROTE-FILE') : call('write_file', { path: 'worker.txt', content: 'written by worker' });
+          else if (hadTools) resp = reply('AGENT-WRITE-VERIFIED');
+          else resp = call('spawn_agent', { role: 'implement', objective: 'write the file' });
+          break;
+        }
+        case 'mcp': {
+          if (!hadTools) {
+            const echoTool = (parsed.tools ?? []).find(t => t?.function?.name?.startsWith('mcp_'));
+            if (!echoTool) { resp = reply('MCP-TOOL-MISSING tools=' + (parsed.tools ?? []).map(t => t?.function?.name).join(',')); break; }
+            resp = call(echoTool.function.name, { message: 'hello-mcp' });
+          } else resp = reply(joined.includes('ECHO:hello-mcp') ? 'MCP-VERIFIED' : 'MCP-BROKEN');
+          break;
+        }
         default: resp = reply('OK');
       }
       send(200, resp);
@@ -151,7 +176,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.0.2'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.1.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -251,6 +276,43 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 { const { code, out } = await oneShot('readonly', 'try write', { mode: 'plan' }); check('plan: write refused', out.includes('WRITE-BLOCKED'), out); }
 { const { code, out } = await oneShot('reasoning', 'hi', { reasoning: 'high' }); check('reasoning high: sent to provider', out.includes('REASON-HIGH'), out); }
 {
+  const { code, out } = await oneShot('agent', 'investigate alpha and beta in parallel');
+  check('multi-agent: 2 research workers run in parallel', code === 0 && out.includes('AGENTS-PARALLEL-VERIFIED'), out.slice(-400));
+}
+{
+  const { code, out, work } = await oneShot('agentwrite', 'delegate writing the file');
+  const file = path.join(work, 'worker.txt');
+  check('multi-agent: implement worker writes file, lead reports', code === 0 && out.includes('AGENT-WRITE-VERIFIED') && fs.existsSync(file) && fs.readFileSync(file, 'utf8') === 'written by worker', out.slice(-400));
+}
+{
+  // MCP: point the config at the fixture server, run a task that uses its echo tool
+  const mcpDir = fs.mkdtempSync(path.join(TMP, 'mcp-'));
+  fs.writeFileSync(path.join(mcpDir, 'mcp.json'), JSON.stringify({ mini: { command: process.execPath, args: [path.join(ROOT, 'test', 'fixtures', 'mini-mcp.mjs')] } }), { mode: 0o600 });
+  const { server, port } = await mock('mcp');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', mcp: true }), { mode: 0o600 });
+  fs.writeFileSync(path.join(CFG, 'mcp.json'), JSON.stringify({ mini: { command: process.execPath, args: [path.join(ROOT, 'test', 'fixtures', 'mini-mcp.mjs')] } }), { mode: 0o600 });
+  process.env.INEED_MCP_CONFIG = path.join(CFG, 'mcp.json');
+  const work = fs.mkdtempSync(path.join(TMP, 'mcptask-'));
+  const { code, out } = await run(['use the echo tool with message hello-mcp'], { cwd: work });
+  server.close();
+  fs.rmSync(mcpDir, { recursive: true, force: true });
+  check('mcp: external server tool callable from agent', code === 0 && out.includes('MCP-VERIFIED'), out.slice(-400));
+  delete process.env.INEED_MCP_CONFIG;
+}
+{
+  // session /mcp listing
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  fs.writeFileSync(path.join(CFG, 'mcp.json'), JSON.stringify({ mini: { command: process.execPath, args: [path.join(ROOT, 'test', 'fixtures', 'mini-mcp.mjs')] } }), { mode: 0o600 });
+  process.env.INEED_MCP_CONFIG = path.join(CFG, 'mcp.json');
+  const { code, out } = await run([], { input: '/mcp\n/exit\n' });
+  check('session: /mcp lists server tools', out.includes('mcp_mini_echo'), out);
+  delete process.env.INEED_MCP_CONFIG;
+  server.close();
+}
+{
   const { code, out } = await oneShot('todo', 'build the thing');
   const hasList = out.includes('To-do') && out.includes('scaffold') && out.includes('test it');
   check('todo: checklist rendered and progresses', code === 0 && hasList && out.includes('TODO-FINISHED'), out.slice(-500));
@@ -274,7 +336,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.0.2'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.1.0'), out);
   server.close();
 }
 

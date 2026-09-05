@@ -64,8 +64,12 @@ The agent decides what it needs: list files, read code, search, edit, run shell 
 | `/plan` | read-only mode, the agent suggests but changes nothing |
 | `/build` | default mode, the agent makes real changes |
 | `/reason` | toggle reasoning effort low/high |
-| `/clear` | forget the current conversation |
+| `/perm` | permission modes: `/perm auto`, `/perm safe` |
+| `/memory` | durable memory status, `/memory on\|off` |
+| `/mcp` | list MCP servers and their tools |
 | `/setup` | redo provider setup |
+| `/config` | show provider config, API key hidden |
+| `/clear` | forget the current conversation |
 | `/exit` | quit |
 
 Shortcuts are optional. Normal language always works.
@@ -94,13 +98,42 @@ Not a chatbot that prints code. A loop that does the work, checks the results, a
 | `write_file` | create files |
 | `edit_file` | targeted patch, not a rewrite |
 | `delete_file` | remove a file |
+| `todo` | visible checklist for multi-step work |
+| `spawn_agent` | delegate to a focused sub-agent |
 | `shell` | build, test, install, git, anything |
+
+### Multi-agent
+
+Big tasks get delegated. The lead agent spawns workers with a role that fits:
+
+| role | can |
+|---|---|
+| `research` | read and report, nothing else, runs in parallel |
+| `review` | inspect code, report findings, runs in parallel |
+| `test` | run tests and commands, no source edits |
+| `implement` | make the change, verify it |
+| `debug` | find the root cause, fix it |
+
+Workers report back with status, summary, evidence, files changed, and commands run. The lead reconciles everything and answers you.
+
+### MCP (Model Context Protocol)
+
+Connect any MCP server and its tools appear in the agent automatically. Create `~/.ineedcodes/mcp.json`:
+
+```json
+{
+  "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }
+}
+```
+
+Restart ineed, and every tool from that server is callable. Check what is loaded with `/mcp` inside a session.
 
 ### Safety
 
 - Secrets (.env, ssh keys, pem files) never enter the model context.
 - Destructive shell commands are refused.
 - Everything is jailed to your working directory.
+- Edits and shell commands ask for your approval first (`/perm auto` relaxes this).
 - Plan mode lets you preview intent before any change.
 
 ## Works with any provider

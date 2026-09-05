@@ -24,6 +24,7 @@ export function normalize(c) {
     reasoning: c.reasoning === 'high' ? 'high' : 'low',
     mode: c.mode === 'plan' ? 'plan' : 'build',
     memory: c.memory !== false,
+    mcp: c.mcp !== false,
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
     permShell: c.permShell === 'allow' ? 'allow' : 'ask'
   };

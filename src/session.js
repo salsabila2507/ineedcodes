@@ -8,6 +8,7 @@ import { fetchModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, box, startSpinner, VERSION, RULE, userBubble, screen } from './ui.js';
 import { wizard } from './wizard.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
+import { mcpConfigured } from './mcp.js';
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -99,6 +100,10 @@ export async function startSession(cfg, { fresh = false } = {}) {
           const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
           say(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
         },
+        onAgentStart: (id, input) => { stopSpinner(); say(cyan('  ◆ spawn ' + id) + gray(` role=${input.role ?? '?'} task=${trunc(String(input.objective ?? ''), 70)}`)); },
+        onAgentEnd: (id, r) => { stopSpinner(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
+        onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
+        onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
         onApprove: async (cat, name, input2) => {
           stopSpinner();
           say(yellow('  ⚠ approval needed') + ' ' + cyan(name) + gray(' ' + trunc(JSON.stringify(input2), 80)));
@@ -156,6 +161,7 @@ export async function startSession(cfg, { fresh = false } = {}) {
       say('  ' + cyan('/perm') + '     permissions: /perm auto | /perm safe | /perm');
       say('  ' + cyan('/config') + '   show provider config (key hidden)');
       say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
+      say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
       say('  ' + cyan('/clear') + '    forget this conversation');
       say('  ' + cyan('/setup') + '    redo provider setup');
       say('  ' + cyan('/reset') + '    clear saved config');
@@ -238,6 +244,29 @@ export async function startSession(cfg, { fresh = false } = {}) {
       if (!provider) { say(yellow('Memory is off.') + dim(' Turn it on with /memory on')); busy = false; return afterTask(); }
       const ok = await ICMAdapter.available();
       say(ok ? green('Memory: on') + dim(` via ${provider.name}.`) : yellow('Memory: provider not installed.') + dim(' Install icm to enable.'));
+      busy = false;
+      return afterTask();
+    }
+    if (input === '/mcp' || input === '/mcp reload') {
+      if (!mcpConfigured()) {
+        say(yellow('No MCP servers configured.') + dim(' Add them to ~/.ineedcodes/mcp.json, e.g.: {"context7":{"command":"npx","args":["-y","@upstash/context7-mcp"]}}'));
+        return;
+      }
+      busy = true;
+      try {
+        const { McpManager } = await import('./mcp.js');
+        const mgr = new McpManager();
+        const errors = await mgr.loadFromConfig();
+        for (const e of errors) say(red('  ✗ ' + e));
+        const tools = await mgr.allTools();
+        if (tools.length) {
+          say(green(`  ${mgr.servers.size} MCP server(s), ${tools.length} tool(s):`));
+          for (const t of tools) say('  ' + cyan(t.name) + gray(' ' + trunc(t.description, 90)));
+        } else if (!errors.length) {
+          say(yellow('  Servers connected but exposed no tools.'));
+        }
+        mgr.killAll();
+      } catch (err) { say(red('  ✗ ' + err.message)); }
       busy = false;
       return afterTask();
     }

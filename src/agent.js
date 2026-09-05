@@ -30,15 +30,106 @@ export function trimHistory(history) {
   return history.slice(start);
 }
 
-export async function runObjective(cfg, objective, cwd, history, hooks = {}) {
+// ── multi-agent: roles, task packets, worker execution ──
+const ROLES = {
+  research: {
+    readonly: true,
+    tools: ['list_files', 'read_file', 'search_text', 'todo'],
+    prompt: 'You are a research worker. Gather facts and report them. Change nothing.'
+  },
+  review: {
+    readonly: true,
+    tools: ['list_files', 'read_file', 'search_text', 'todo'],
+    prompt: 'You are a review worker. Inspect the code for correctness, bugs, and quality. Report findings, change nothing.'
+  },
+  test: {
+    readonly: false,
+    tools: ['list_files', 'read_file', 'search_text', 'shell', 'todo'],
+    prompt: 'You are a test worker. Run the relevant tests or commands and report the evidence. Do not modify source files.'
+  },
+  implement: {
+    readonly: false,
+    tools: null, // all tools
+    prompt: 'You are an implementation worker. Make the change the lead asked for, verify it works, and report what you did.'
+  },
+  debug: {
+    readonly: false,
+    tools: null, // all tools
+    prompt: 'You are a debugging worker. Find the root cause, fix it if you can, and report cause plus evidence.'
+  }
+};
+
+let workerSeq = 0;
+
+function workerResultText(r) {
+  const files = r.files?.length ? ` files: ${r.files.join(', ')};` : '';
+  const cmds = r.commands?.length ? ` ran ${r.commands.length} command(s);` : '';
+  return `Worker ${r.id} [${r.status}]: ${String(r.summary).slice(0, 800)}.${files}${cmds}`;
+}
+
+async function runWorker(cfg, spec, cwd, depth, hooks) {
+  const roleName = ROLES[spec.input.role] ? spec.input.role : 'research';
+  const role = ROLES[roleName];
+  const objective = String(spec.input.objective ?? '')
+    + (spec.input.context ? `\nContext from lead agent: ${String(spec.input.context).slice(0, 1_000)}` : '');
+  try {
+    const res = await runObjective(cfg, objective, cwd, [], {}, {
+      depth: depth + 1,
+      toolFilter: role.tools,
+      worker: { id: spec.id, role: roleName, prompt: role.prompt }
+    });
+    return { id: spec.id, role: roleName, status: res.aborted ? 'incomplete' : 'completed', summary: res.answer || '(no output)', files: res.changed, commands: res.ran };
+  } catch (err) {
+    return { id: spec.id, role: roleName, status: 'failed', summary: err.message, files: [], commands: [] };
+  }
+}
+
+const SPAWN_TOOL = {
+  name: 'spawn_agent',
+  description: 'Spawn a focused sub-agent worker. Roles: research (read only), review (read only), test (runs commands, does not edit), implement (edits), debug (finds and fixes). Read-only workers can run in parallel.',
+  parameters: {
+    type: 'object',
+    properties: {
+      role: { type: 'string', enum: Object.keys(ROLES) },
+      objective: { type: 'string', description: 'the exact task for this worker' },
+      context: { type: 'string', description: 'relevant context: files, errors, constraints' }
+    },
+    required: ['role', 'objective']
+  },
+  allowedInPlan: true
+};
+
+export async function runObjective(cfg, objective, cwd, history, hooks = {}, extra = {}) {
   const ctrl = new AbortController();
   hooks.onRunStart?.(ctrl);
   const plan = cfg.mode === 'plan';
-  const tools = plan ? TOOLS.filter(t => t.allowedInPlan) : TOOLS;
+  const depth = extra.depth ?? 0;
+  let tools = plan ? TOOLS.filter(t => t.allowedInPlan) : [...TOOLS, SPAWN_TOOL];
+  if (extra.toolFilter) tools = tools.filter(t => (extra.toolFilter).includes(t.name));
   const canAsk = typeof hooks.onApprove === 'function';
 
+  // MCP: load configured servers once per top-level objective, expose their tools
+  let mcpManager = null;
+  const mcpMap = new Map();
+  if (depth === 0 && !plan && cfg.mcp !== false) {
+    try {
+      const { McpManager, mcpConfigured } = await import('./mcp.js');
+      if (mcpConfigured()) {
+        mcpManager = new McpManager();
+        const errors = await mcpManager.loadFromConfig();
+        errors.forEach(e => hooks.onText?.(dim(e)));
+        const mcpTools = await mcpManager.allTools();
+        const names = new Set(tools.map(t => t.name));
+        for (const t of mcpTools) {
+          if (!names.has(t.name)) { tools.push(t); mcpMap.set(t.name, t.mcp); names.add(t.name); }
+        }
+        hooks.onMCP?.(mcpTools.map(t => t.name));
+      }
+    } catch {}
+  }
+
   // recall durable memory before meaningful work (rule 12/15: MemoryProvider abstraction)
-  const memory = getMemoryProvider(cfg);
+  const memory = extra.skipMemory ? null : getMemoryProvider(cfg);
   let recalled = '';
   if (memory) {
     hooks.onMemoryStart?.();
@@ -46,10 +137,11 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}) {
     hooks.onMemoryEnd?.(recalled);
   }
 
+  const workerPrefix = extra.worker ? `You are ${extra.worker.id} (${extra.worker.role} worker) spawned by the lead agent. ${extra.worker.prompt}\n` : '';
   const messages = [
     {
       role: 'system',
-      content: `${SYSTEM}\nWorking directory: ${cwd}\nMode: ${plan ? 'plan (read only, suggest what to change, do not change anything)' : 'build'}`
+      content: `${workerPrefix ? workerPrefix + '\n' : ''}${SYSTEM}\nWorking directory: ${cwd}\nMode: ${plan ? 'plan (read only, suggest what to change, do not change anything)' : 'build'}`
         + (recalled ? `\nRelevant memory from previous sessions with this user (durable facts, may be stale):\n${recalled}` : '')
     },
     ...trimHistory(history),
@@ -89,12 +181,44 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}) {
         }
         return { answer, changed: [...changed], ran, todos: [...todos], aborted: false };
       }
+      // spawn_agent pre-pass: read-only workers run in parallel (max 4), writers sequentially
+      const spawnResults = new Map();
+      const spawnCalls = calls.filter(c => c.function?.name === 'spawn_agent');
+      if (spawnCalls.length && depth === 0) {
+        const specs = spawnCalls.map(c => {
+          let input = {};
+          try { input = JSON.parse(c.function?.arguments || '{}'); } catch {}
+          const role = ROLES[input.role] ? input.role : 'research';
+          return { call: c, input, role, id: `${role}-${++workerSeq}` };
+        });
+        const runOne = async s => {
+          hooks.onAgentStart?.(s.id, s.input);
+          const r = await runWorker(cfg, s, cwd, depth, hooks);
+          hooks.onAgentEnd?.(s.id, r);
+          spawnResults.set(s.call.id, r);
+        };
+        const readonly = specs.filter(s => ROLES[s.role].readonly).slice(0, 4);
+        const writers = specs.filter(s => !ROLES[s.role].readonly);
+        for (let i = 0; i < readonly.length; i += 4) {
+          await Promise.all(readonly.slice(i, i + 4).map(runOne));
+        }
+        for (const s of writers) await runOne(s);
+      }
+
       for (const call of calls) {
         let input = {};
         try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
         hooks.onTool?.(call.function?.name, input);
         let result;
-        if (call.function?.name === 'shell') {
+        if (spawnResults.has(call.id)) {
+          result = { output: workerResultText(spawnResults.get(call.id)) };
+        } else if (call.function?.name === 'spawn_agent') {
+          result = { output: 'Refused: workers cannot spawn more agents.' };
+        } else if (mcpMap.has(call.function?.name)) {
+          const m = mcpMap.get(call.function?.name);
+          result = await mcpManager.call(m.server, m.tool, input);
+          hooks.onMCPResult?.(call.function?.name, result.output);
+        } else if (call.function?.name === 'shell') {
           if (plan) result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
           else if (isDestructive(String(input.command ?? ''))) {
             result = { output: 'Refused: that command is destructive. Run it yourself if you are sure.' };
@@ -112,7 +236,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}) {
             ran.push(String(input.command ?? '').slice(0, 120));
           }
         } else {
-          if (plan && !TOOLS.find(t => t.name === call.function?.name)?.allowedInPlan) {
+          if (plan && !tools.find(t => t.name === call.function?.name)) {
             result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
           } else if (call.function?.name === 'todo') {
             const list = Array.isArray(input.todos) ? input.todos : [];
