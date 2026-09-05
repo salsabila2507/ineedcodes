@@ -8,9 +8,35 @@ import { fetchModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, box, startSpinner, VERSION, RULE, userBubble, screen } from './ui.js';
 import { wizard } from './wizard.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
+import { saveSession, listSessions, loadSession } from './sessions.js';
+import * as boost from './boost.js';
 import { mcpConfigured } from './mcp.js';
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+
+// Context compaction (master prompt #32): when the saved conversation grows past the
+// cap, summarize the oldest half into a factual checkpoint and drop the raw turns.
+const COMPACT_CHARS = 24_000;
+async function compactHistory(cfg, history, hooks = {}) {
+  const size = history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0);
+  if (size < COMPACT_CHARS || history.length < 6) return history;
+  const cut = Math.floor(history.length / 2);
+  const old = history.slice(0, cut);
+  const rest = history.slice(cut);
+  const digest = old.map(m => `${m.role}: ${String(m.content ?? '').replaceAll('\n', ' ').slice(0, 160)}`).join('\n');
+  try {
+    const { chat } = await import('./provider.js');
+    const msg = await chat({ ...cfg, reasoning: 'low' }, [
+      { role: 'user', content: `Summarize this conversation into a factual checkpoint: goals, decisions, files touched, unresolved work. Max 12 lines. No prose flourish.\n---\n${digest.slice(0, 10_000)}` }
+    ]);
+    const summary = String(msg.content ?? '').trim();
+    if (summary.length > 20) {
+      hooks.onNote?.(`compacted ${cut} turns into a checkpoint (${(size / 1000).toFixed(0)}k -> ${((summary.length + rest.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0)) / 1000).toFixed(0)}k chars)`);
+      return [{ role: 'user', content: '[conversation checkpoint] ' + summary }, { role: 'assistant', content: 'Checkpoint noted. Continuing from there.' }, ...rest];
+    }
+  } catch {}
+  return history.slice(-10); // provider unavailable: keep the newest turns
+}
 
 function wrapLines(text, width) {
   const out = [];
@@ -32,9 +58,9 @@ function wrapLines(text, width) {
   return out;
 }
 
-export async function startSession(cfg, { fresh = false } = {}) {
+export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const state = normalize(cfg);
-  let history = [];
+  let history = resume?.length ? [...resume] : [];
   let busy = false;
   let activeRun = null;
   let mode = state.mode;
@@ -45,6 +71,8 @@ export async function startSession(cfg, { fresh = false } = {}) {
   const steerQueue = [];      // notes typed while a task runs, injected mid-task
 
   const TUI = process.stdout.isTTY && !process.env.NO_COLOR;
+  let sessionId = null;
+  let lastBoost = null;
 
   // ONE readline, ONE line dispatcher for the whole session
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -79,59 +107,67 @@ export async function startSession(cfg, { fresh = false } = {}) {
     if (TUI) drawStatus();
   }
 
+  function hooksForRun(stopSpinner) {
+    let spinner = null;
+    const stop = () => { spinner?.stop(); spinner = null; };
+    return {
+      spinnerStop: stop,
+      onMemoryStart: () => { stop(); spinner = startSpinner('recalling memory'); },
+      onMemoryEnd: () => stop(),
+      onThinkingStart: () => { stop(); spinner = startSpinner('thinking'); },
+      onThinkingEnd: () => stop(),
+      onWorkStart: label => { stop(); spinner = startSpinner(label || 'working'); },
+      onWorkEnd: () => stop(),
+      onTool: (name, input2) => { stop(); say(cyan('  ● ' + name) + gray(' ' + trunc(JSON.stringify(input2), 90))); },
+      onResult: out => { say(gray('    ' + trunc(out, 110))); },
+      onText: t => { stop(); },
+      onTodos: list => {
+        stop();
+        const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
+        say(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
+      },
+      onAgentStart: (id, input) => { stop(); say(cyan('  ◆ spawn ' + id) + gray(` role=${input.role ?? '?'} task=${trunc(String(input.objective ?? ''), 70)}`)); },
+      onAgentEnd: (id, r) => { stop(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
+      onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
+      onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
+      onNote: note => { stop(); say(dim('  ◇ ' + note)); },
+      drainSteer: () => steerQueue.splice(0),
+      onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
+      onApprove: async (cat, name, input2) => {
+        stop();
+        say(yellow('  ⚠ approval needed') + ' ' + cyan(name) + gray(' ' + trunc(JSON.stringify(input2), 80)));
+        const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
+        const c = a.trim().toLowerCase();
+        if (c === 's' || c === 'save') {
+          approved.add(cat);
+          if (cat === 'edit') Object.assign(state, normalize({ ...state, permEdit: 'allow' }));
+          if (cat === 'shell') Object.assign(state, normalize({ ...state, permShell: 'allow' }));
+          saveConfig(state);
+          say(dim('     always allowed, saved to config. /perm safe to undo.'));
+          return 'always';
+        }
+        if (c === 'a' || c === 'always') { approved.add(cat); say(dim('     always allowed for this session.')); return 'always'; }
+        if (c === 'y' || c === 'yes') return true;
+        say(dim('     denied.'));
+        return false;
+      },
+      approved,
+      onRunStart: c => { activeRun = c; },
+      onRunEnd: () => { activeRun = null; stop(); }
+    };
+  }
+
   async function runTask(input) {
     busy = true;
-    let lastStreamed = '';
     if (TUI) tuiUserLine(input);
-    let spinner = null;
-    const stopSpinner = () => { spinner?.stop(); spinner = null; };
+    const hooks = hooksForRun();
+    const stopSpinner = hooks.spinnerStop;
     try {
-      const res = await runObjective(state, input, process.cwd(), history, {
-        onMemoryStart: () => { stopSpinner(); spinner = startSpinner('recalling memory'); },
-        onMemoryEnd: () => stopSpinner(),
-        onThinkingStart: () => { stopSpinner(); spinner = startSpinner('thinking'); },
-        onThinkingEnd: () => stopSpinner(),
-        onWorkStart: label => { stopSpinner(); spinner = startSpinner(label || 'working'); },
-        onWorkEnd: () => stopSpinner(),
-        onTool: (name, input2) => { stopSpinner(); say(cyan('  ● ' + name) + gray(' ' + trunc(JSON.stringify(input2), 90))); },
-        onResult: out => { say(gray('    ' + trunc(out, 110))); },
-        onText: t => { stopSpinner(); lastStreamed = t; },
-        onTodos: list => {
-          stopSpinner();
-          const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
-          say(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
-        },
-        onAgentStart: (id, input) => { stopSpinner(); say(cyan('  ◆ spawn ' + id) + gray(` role=${input.role ?? '?'} task=${trunc(String(input.objective ?? ''), 70)}`)); },
-        onAgentEnd: (id, r) => { stopSpinner(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
-        onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
-        onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
-        onNote: note => { stopSpinner(); say(dim('  ◇ ' + note)); },
-        drainSteer: () => steerQueue.splice(0),
-        onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
-        onApprove: async (cat, name, input2) => {
-          stopSpinner();
-          say(yellow('  ⚠ approval needed') + ' ' + cyan(name) + gray(' ' + trunc(JSON.stringify(input2), 80)));
-          const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
-          const c = a.trim().toLowerCase();
-          if (c === 's' || c === 'save') {
-            approved.add(cat);
-            if (cat === 'edit') Object.assign(state, normalize({ ...state, permEdit: 'allow' }));
-            if (cat === 'shell') Object.assign(state, normalize({ ...state, permShell: 'allow' }));
-            saveConfig(state);
-            say(dim('     always allowed, saved to config. /perm safe to undo.'));
-            return 'always';
-          }
-          if (c === 'a' || c === 'always') { approved.add(cat); say(dim('     always allowed for this session.')); return 'always'; }
-          if (c === 'y' || c === 'yes') return true;
-          say(dim('     denied.'));
-          return false;
-        },
-        approved,
-        onRunStart: c => { activeRun = c; },
-        onRunEnd: () => { activeRun = null; stopSpinner(); }
-      });
+      const res = await runObjective(state, input, process.cwd(), history, hooks);
       history = pushTurn(history, input, res);
       stopSpinner();
+      try { history = await compactHistory(state, history, { onNote: n => say(dim('  ◇ ' + n)) }); } catch {}
+      try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
         say(yellow('  ■ Stopped') + dim(' - partly done. Ask me to continue.'));
       } else {
@@ -144,6 +180,7 @@ export async function startSession(cfg, { fresh = false } = {}) {
     } catch (err) {
       stopSpinner();
       history = pushTurn(history, input, { answer: '(task failed: ' + err.message + ')' });
+      try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       say(red('  ✗ ' + err.message) + dim('  context kept.'));
     } finally {
       busy = false;
@@ -173,8 +210,10 @@ export async function startSession(cfg, { fresh = false } = {}) {
       say('  ' + cyan('/build') + '    build mode: real changes (default)');
       say('  ' + cyan('/reason') + '   toggle reasoning low/high');
       say('  ' + cyan('/perm') + '     permissions: /perm auto | /perm safe | /perm');
+      say('  ' + cyan('/boost') + '    isolated git-worktree run: /boost <objective>');
       say('  ' + cyan('/config') + '   show provider config (key hidden)');
       say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
+      say('  ' + cyan('/resume') + '   bring back a saved conversation');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
       say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
       say('  ' + cyan('/clear') + '    forget this conversation');
@@ -286,6 +325,77 @@ export async function startSession(cfg, { fresh = false } = {}) {
         dim('toggle') + '      /humanizer on | /humanizer off'
       ]));
       return;
+    }
+    if (input === '/boost cancel') {
+      if (!lastBoost) { say(dim('No boost run to cancel.')); return; }
+      const { dir, branch } = lastBoost;
+      boost.cleanupBoost(process.cwd(), dir, branch);
+      lastBoost = null;
+      say(yellow('Boost worktree and branch removed.'));
+      return;
+    }
+    if (input === '/boost' || input.startsWith('/boost ')) {
+      const objective = input.slice(6).trim();
+      if (!objective) {
+        say(box([
+          bold('Boost') + dim('  isolated execution in a git worktree'),
+          dim('/boost <objective>') + '  run the task away from your tree, review, then merge',
+          dim('/boost cancel') + '        remove the last boost worktree'
+        ]));
+        return;
+      }
+      busy = true;
+      try {
+        if (!boost.boostAvailable(process.cwd())) { say(yellow('Boost needs a git repository (with a commit).')); return; }
+        const b = boost.startBoost(process.cwd());
+        if (!b.ok) { say(red('Boost failed: ' + b.error)); return; }
+        lastBoost = b;
+        say(cyan(`  ⚡ boost ${b.branch}`) + dim(` worktree at ${b.dir}`));
+        const res = await runObjective(state, objective, b.dir, [], { ...hooksForRun(), skipMemory: true });
+        say((res.aborted ? yellow('  ■ Stopped') : green('  ⚡ Boost task done')) + dim(` in ${b.branch}`));
+        boost.commitBoost(b.dir, 'boost: ' + objective.slice(0, 80));
+        const d = boost.boostDiff(b.dir);
+        if (d.files.length) {
+          say(box([bold('Boost changes'), ...d.files.map(f => '  ' + f)]));
+          const a = await ask(`   [y] merge into ${boost.currentBranch(process.cwd())} · [n] keep worktree: `);
+          if (/^y/i.test(a.trim())) {
+            const m = boost.mergeBoost(process.cwd(), b.branch);
+            if (m.ok) { say(green('Merged into your branch.')); boost.cleanupBoost(process.cwd(), b.dir, b.branch); lastBoost = null; }
+            else { say(red('Merge conflict, worktree kept: ' + m.out)); }
+          } else {
+            say(dim('Worktree kept: ' + b.dir + ' (' + b.branch + '). /boost cancel removes it.'));
+          }
+        } else {
+          say(dim('No file changes came out of the boost run.'));
+          boost.cleanupBoost(process.cwd(), b.dir, b.branch);
+          lastBoost = null;
+        }
+      } catch (err) {
+        say(red('  ✗ boost failed: ' + err.message));
+      } finally {
+        busy = false;
+        await afterTask();
+      }
+      return;
+    }
+    if (input === '/resume') {
+      busy = true;
+      const list = listSessions();
+      if (!list.length) { say(yellow('No saved sessions yet.')); busy = false; return afterTask(); }
+      list.slice(0, 5).forEach((s, i) => {
+        const first = String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' ').slice(0, 70);
+        say(`   ${i + 1}. ${new Date(s.time).toLocaleString()} · ${Math.floor((s.history?.length ?? 0) / 2)} turns · ${first}`);
+      });
+      const pick = await ask('   Resume which? [1]: ');
+      const n = Number(pick) || 1;
+      const s = loadSession(list[n - 1]?.id);
+      if (s?.history?.length) {
+        history = s.history;
+        sessionId = s.id;
+        say(green(`Resumed ${Math.floor(s.history.length / 2)} turns. Continue where we left off.`));
+      } else say(red('Could not load that session.'));
+      busy = false;
+      return afterTask();
     }
     if (input === '/mcp' || input === '/mcp reload') {
       if (!mcpConfigured()) {

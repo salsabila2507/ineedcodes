@@ -95,5 +95,12 @@ if (args.length > 0 && args[0] !== '--reset') {
   }
   const { startSession } = await import('./session.js');
   const wasFresh = fresh || process.env.INEED_FRESH === '1';
-  await startSession(cfg, { fresh: wasFresh });
+  let resumeHistory = null;
+  if (args[0] === '--resume' || args[0] === '-r') {
+    const { listSessions } = await import('./sessions.js');
+    const latest = listSessions()[0];
+    if (latest?.history?.length) { resumeHistory = latest.history; console.log(dim(`Resuming ${Math.floor(latest.history.length / 2)} turns.`)); }
+    else console.log(dim('No saved session found. Starting fresh.'));
+  }
+  await startSession(cfg, { fresh: wasFresh, resume: resumeHistory });
 }

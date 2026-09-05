@@ -3,7 +3,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 
@@ -163,6 +163,16 @@ function mock(script) {
           else resp = reply(joined.includes('step-one') ? 'STEER-SEEN' : 'STEER-BROKEN');
           break;
         }
+        case 'resume': {
+          const first = String(msgs.filter(m => m.role === 'user')[0]?.content ?? '');
+          if (first.includes('CHECKPOINT-SENTINEL')) resp = reply('RESUME-CONTEXT-OK');
+          else resp = reply('RESUME-MISSING');
+          break;
+        }
+        case 'boost':
+          if (!hadTools) resp = call('write_file', { path: 'boost.txt', content: 'boosted by worker' });
+          else resp = reply('BOOST-FILE-DONE');
+          break;
         default: resp = reply('OK');
       }
       send(200, resp);
@@ -206,7 +216,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.2.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.3.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -366,7 +376,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.2.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.3.0'), out);
   server.close();
 }
 
@@ -546,6 +556,44 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
     ]
   });
   check('steering: mid-task note reaches the agent', code === 0 && out.includes('STEER-SEEN') && out.includes('steer:'), out.slice(-400));
+  server.close();
+}
+
+// ── session persistence: task 1 saves, /resume restores for task 2 ──
+{
+  const { server, port } = await mock('resume');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow' }), { mode: 0o600 });
+  const work = fs.mkdtempSync(path.join(TMP, 'persist-'));
+  await run([], { cwd: work, input: 'CHECKPOINT-SENTINEL marker task\n/exit\n' });
+  const { code, out } = await run([], { cwd: work, input: '/resume\n1\nwhat did we do\n/exit\n' });
+  check('session: /resume restores saved history', code === 0 && out.includes('RESUME-CONTEXT-OK') && out.includes('Resumed'), out.slice(-400));
+  server.close();
+}
+
+// ── boost: isolated worktree, merge back after approval ──
+{
+  const repo = fs.mkdtempSync(path.join(TMP, 'boostrepo-'));
+  const g = (args, cwd2 = repo) => spawnSync('git', args, { cwd: cwd2, encoding: 'utf8' });
+  g(['init', '-q', '-b', 'main']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+  g(['add', '-A']);
+  g(['commit', '-q', '-m', 'base', '--no-gpg-sign']);
+  const { server, port } = await mock('boost');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow' }), { mode: 0o600 });
+  const { code, out } = await run([], {
+    cwd: repo,
+    staged: [
+      { when: '', send: '/boost create boost.txt with content boosted', immediate: true },
+      { when: 'merge into', send: 'y' },
+      { when: 'Merged', send: '/exit' }
+    ]
+  });
+  const merged = fs.existsSync(path.join(repo, 'boost.txt')) && fs.readFileSync(path.join(repo, 'boost.txt'), 'utf8').includes('boosted');
+  check('boost: worktree run merged into the branch', code === 0 && merged && out.includes('Merged'), out.slice(-500));
   server.close();
 }
 

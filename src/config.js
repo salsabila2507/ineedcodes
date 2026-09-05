@@ -6,6 +6,7 @@ import * as path from 'node:path';
 
 export const CONFIG_DIR = process.env.INEED_CONFIG_DIR || path.join(os.homedir(), '.ineedcodes');
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+export { CONFIG_DIR as configDirPath };
 
 export function loadConfig() {
   try {
