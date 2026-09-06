@@ -41,7 +41,7 @@ execSync(`npm install --prefix ${JSON.stringify(prefix)} --no-audit --no-fund --
 const bin = path.join(prefix, 'node_modules', '.bin', 'ineed');
 check('installed bin exists and is executable', fs.existsSync(bin) && !!(fs.statSync(bin).mode & 0o111));
 const v = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000 });
-check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.7.0'), v.stdout + v.stderr);
+check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.7.1'), v.stdout + v.stderr);
 const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000 });
 check('installed bin --help works', h.status === 0 && h.stdout.includes('one-shot task'), h.stdout + h.stderr);
 
