@@ -262,7 +262,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/status') + '   everything about this session at a glance');
       say('  ' + cyan('/compact') + '  shrink the conversation into a checkpoint');
       say('  ' + cyan('/depth') + '    answer depth: /depth short|normal|deep');
-      say('  ' + cyan('/resume') + '   bring back a saved conversation');
+      say('  ' + cyan('/new') + '     start a fresh session, keep the old saved');
+      say('  ' + cyan('/resume') + '   list sessions, /resume <code> like 1425-0609');
       say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
       say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
@@ -292,9 +293,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   async function handle(input) {
     if (!input) return;
     if (busy) {
-      if (input === '/stop') { activeRun?.abort(); say(dim('  (stopping...')); return; }
+      if (input === '/stop' || input.startsWith('/stop ') || input === 'stop') { activeRun?.abort(); say(dim('  (stopping...')); return; }
       if (input.startsWith('/')) { pendingLines.push(input); return; }
       steerQueue.push(input);
+      // interrupt the in-flight provider call so the steer applies immediately
+      if (activeRun) activeRun.abort('steer');
+      say(dim('  ↳ steer noted, applying it now...'));
       return;
     }
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
@@ -481,22 +485,41 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
       return;
     }
-    if (input === '/resume') {
+    if (input === '/new') {
+      if (sessionId) saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history });
+      history = [];
+      sessionId = null;
+      say(green('New session started.') + dim(' The old one is saved, /resume brings it back.'));
+      if (TUI) { chatLines.length = 0; redrawChat(); drawStatus(); }
+      return;
+    }
+    if (input === '/resume' || input.startsWith('/resume ')) {
+      const codeArg = input === '/resume' ? '' : input.slice(8).trim();
       busy = true;
       const list = listSessions();
       if (!list.length) { say(yellow('No saved sessions yet.')); busy = false; return afterTask(); }
-      list.slice(0, 5).forEach((s, i) => {
+      if (codeArg) {
+        const s = loadSession(codeArg);
+        if (s?.history?.length) {
+          history = s.history;
+          sessionId = s.id;
+          say(green(`Resumed ${s.id} (${Math.floor(s.history.length / 2)} turns). Continue where we left off.`));
+        } else say(red(`No session with code ${codeArg}. Check /resume for the list of codes.`));
+        busy = false;
+        return afterTask();
+      }
+      list.slice(0, 8).forEach((s, i) => {
         const first = String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' ').slice(0, 70);
-        say(`   ${i + 1}. ${new Date(s.time).toLocaleString()} · ${Math.floor((s.history?.length ?? 0) / 2)} turns · ${first}`);
+        say(`   ${s.id}  ·  ${Math.floor((s.history?.length ?? 0) / 2)} turns  ·  ${first}`);
       });
-      const pick = await ask('   Resume which? [1]: ');
-      const n = Number(pick) || 1;
-      const s = loadSession(list[n - 1]?.id);
+      const pick = await ask('   Resume which? (code, e.g. 1425-0609, empty = newest): ');
+      const s = pick ? loadSession(pick.trim()) : list[0];
       if (s?.history?.length) {
         history = s.history;
         sessionId = s.id;
-        say(green(`Resumed ${Math.floor(s.history.length / 2)} turns. Continue where we left off.`));
-      } else say(red('Could not load that session.'));
+        say(green(`Resumed ${s.id} (${Math.floor(s.history.length / 2)} turns). Continue where we left off.`));
+        if (TUI) redrawChat();
+      } else say(red(`No session with code ${pick}. Check the list above.`));
       busy = false;
       return afterTask();
     }

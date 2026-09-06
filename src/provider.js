@@ -11,7 +11,13 @@ async function request(url, opts, signal) {
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } catch (err) {
-    if (signal?.aborted) { const e = new Error('stopped by user'); e.stopped = true; throw e; }
+    if (signal?.aborted) {
+      // signal.reason can be a string (abort('steer')) that undici rethrows as-is
+      const e = new Error('stopped by user');
+      e.stopped = true;
+      e.reason = signal.reason;
+      throw e;
+    }
     if (timedOut) throw new Error('request timed out after 120s');
     throw new Error(`cannot reach ${url}: ${err.message}`);
   } finally {

@@ -29,8 +29,11 @@ const SYSTEM = `You are ineed, an autonomous terminal agent on the user's machin
 Rules:
 - Use the tools to do real work. Never invent output. Every success claim needs evidence from a tool result.
 - Prefer targeted edits (edit_file) over full rewrites (write_file). Work only inside the current folder.
+- Scope discipline: never explore outside the working folder (no listing the home directory, no scanning drives, no cloning repos) unless the user explicitly names those paths in the current objective. If the task needs it, ask first.
+- Prefer answering from what you already know: questions like "udah?", "done?", or status checks get a direct answer from the conversation. Only call tools when new facts are genuinely needed.
 - Never push to remotes or delete data without being asked.
 - Destructive commands are always blocked. Ask the user to run those themselves.
+- Your replies go straight to a terminal: never use markdown formatting (no **bold**, no ## headers, no tables, no emojis as decoration). Plain sentences and simple "- " bullets only.
 - Explain to match the user's depth preference (short: results only; normal: what changed and why; deep: also the reasoning and trade-offs).
 - Suggest "boost" (isolated git-worktree run) when a task involves major refactoring, repeated failed fixes, or architecture changes, by telling the user to run /boost. Do not start it yourself.
 - Some actions need user approval. A tool result starting with "Denied" means the user said no: do not retry the same call, explain what you wanted instead.
@@ -121,7 +124,7 @@ const SPAWN_TOOL = {
 };
 
 export async function runObjective(cfg, objective, cwd, history, hooks = {}, extra = {}) {
-  const ctrl = new AbortController();
+  let ctrl = new AbortController();
   hooks.onRunStart?.(ctrl);
   const plan = cfg.mode === 'plan';
   const depth = extra.depth ?? 0;
@@ -188,19 +191,27 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const usage = { input: 0, output: 0 };
   let answer = '';
   let lastShown = '';
+  // notes typed mid-task, injected at safe points; a steer can also interrupt an in-flight call
+  const drainSteerInto = () => {
+    const steer = hooks.drainSteer?.() ?? [];
+    for (const s of steer) {
+      messages.push({ role: 'user', content: `[steer from the user, newer than the objective] ${s}` });
+    }
+    if (steer.length) hooks.onSteer?.(steer);
+    return steer;
+  };
+  let steerRestarts = 0;
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
-      if (ctrl.signal.aborted) break;
-      // steering: notes typed while the task runs join the conversation here
-      if (hooks.drainSteer) {
-        const steer = hooks.drainSteer();
-        if (steer.length) {
-          for (const s of steer) {
-            messages.push({ role: 'user', content: `[steer from the user, newer than the objective] ${s}` });
-          }
-          hooks.onSteer?.(steer);
-        }
+      // a steer abort must not kill the task: restart the call with the note included
+      if (ctrl.signal.aborted && ctrl.signal.reason === 'steer') {
+        drainSteerInto();
+        hooks.onNote?.('applying your steer, restarting the call');
+        ctrl = new AbortController();
+        hooks.onRunStart?.(ctrl);
       }
+      if (ctrl.signal.aborted) break;
+      drainSteerInto();
       let msg;
       try {
         hooks.onThinkingStart?.();
@@ -208,6 +219,16 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         hooks.onThinkingEnd?.();
       } catch (err) {
         hooks.onThinkingEnd?.();
+        const steerInterrupt = ctrl.signal.aborted && (ctrl.signal.reason === 'steer' || err.reason === 'steer');
+        if (steerInterrupt && steerRestarts < 20) {
+          steerRestarts++;
+          drainSteerInto();
+          hooks.onNote?.('applying your steer, restarting the call');
+          ctrl = new AbortController();
+          hooks.onRunStart?.(ctrl);
+          step--; // redo this step with the steer included
+          continue;
+        }
         if (ctrl.signal.aborted) break;
         throw err;
       }
@@ -253,11 +274,16 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
 
       for (const call of calls) {
+        // a stop must cut through: never execute queued tools after an abort
+        if (ctrl.signal.aborted) break;
         let input = {};
         try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
         hooks.onTool?.(call.function?.name, input);
         let result;
-        if (spawnResults.has(call.id)) {
+        // enforce the role's tool allowlist at execution time, not just listing time
+        if (extra.toolFilter && !extra.toolFilter.includes(call.function?.name)) {
+          result = { output: `Refused: your role is not allowed to use ${call.function?.name}. Report what you need instead.` };
+        } else if (spawnResults.has(call.id)) {
           result = { output: workerResultText(spawnResults.get(call.id)) };
         } else if (call.function?.name === 'spawn_agent') {
           result = { output: 'Refused: workers cannot spawn more agents.' };
@@ -334,7 +360,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             result = { output: `Todo list updated (${todos.filter(t => t.status === 'completed').length}/${todos.length} done).` };
           } else {
             const name = call.function?.name;
-            const isEdit = ['write_file', 'edit_file', 'delete_file'].includes(name);
+            const isEdit = ['write_file', 'edit_file', 'delete_file', 'copy_file', 'move_file'].includes(name);
             let allowedNow = true;
             if (isEdit && cfg.permEdit !== 'allow' && !hooks.approved?.has('edit')) {
               const verdict = canAsk ? await hooks.onApprove('edit', name, input) : true; // cannot ask: CI-style allow

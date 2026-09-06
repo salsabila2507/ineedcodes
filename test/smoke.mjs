@@ -216,10 +216,32 @@ function mock(script) {
           resp = reply('DEPTH-ANSWER');
           break;
         }
+        case 'workerjail': {
+          const last = toolResults[toolResults.length - 1] ?? '';
+          const isWorker = String(msgs[0]?.content ?? '').includes('worker) spawned by the lead agent');
+          if (isWorker && !hadTools) resp = call('write_file', { path: 'jailbreak.txt', content: 'nope' });
+          else if (isWorker) resp = reply(joined.includes('not allowed to use write_file') ? 'JAIL-REFUSED-ACK' : 'WORKER-STILL-RUNNING');
+          else if (hadTools) resp = reply(joined.includes('JAIL-REFUSED-ACK') ? 'WORKERJAIL-VERIFIED' : 'WORKERJAIL-BROKEN: ' + joined.slice(0, 160));
+          else resp = call('spawn_agent', { role: 'research', objective: 'write something' });
+          break;
+        }
         case 'boost':
           if (!hadTools) resp = call('write_file', { path: 'boost.txt', content: 'boosted by worker' });
           else resp = reply('BOOST-FILE-DONE');
           break;
+        case 'files': {
+          // last tool result decides the next step (results accumulate)
+          const last = toolResults[toolResults.length - 1] ?? '';
+          if (!hadTools) resp = call('file_exists', { path: 'a.txt' });
+          else if (last.startsWith('yes:')) resp = call('copy_file', { path: 'a.txt', to: 'b.txt' });
+          else if (last.startsWith('Copied')) resp = call('move_file', { path: 'b.txt', to: 'c.txt' });
+          else if (last.startsWith('Moved')) resp = call('file_metadata', { path: 'c.txt' });
+          else if (last.includes('size:') && last.includes('bytes')) resp = call('read_file_range', { path: 'c.txt', offset: 1, limit: 5 });
+          else if (last.includes(' lines ') && last.includes(' of ')) resp = call('search_files', { pattern: 'c.txt' });
+          else if (/^c\.txt(\n|\$)/.test(last) || last === 'c.txt') resp = reply('FILES-VERIFIED');
+          else resp = reply('FILES-BROKEN: ' + last.slice(0, 150));
+          break;
+        }
         default: resp = reply('OK');
       }
       send(200, resp);
@@ -228,7 +250,7 @@ function mock(script) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })));
 }
 
-function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null } = {}) {
+function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null, typeAt = null } = {}) {
   return new Promise(resolve => {
     const extraPath = fakePath ? fakePath + path.delimiter + process.env.PATH : process.env.PATH;
     const child = spawn(process.execPath, [CLI, ...args], {
@@ -252,6 +274,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
     child.stderr.on('data', c => out += c);
     const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
     child.on('close', code => { clearTimeout(timer); resolve({ code, out }); });
+    if (typeAt) for (const t of typeAt) setTimeout(() => child.stdin.write(t.text + '\n'), t.ms);
     if (autoExitMs !== null) {
       setTimeout(() => child.stdin.write('/exit\n'), autoExitMs);
     } else if (staged) {
@@ -593,16 +616,13 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const work = fs.mkdtempSync(path.join(TMP, 'steer-'));
   const { code, out } = await run([], {
     cwd: work,
-    autoExitMs: 12_000,
+    autoExitMs: 15_000,
+    typeAt: [{ ms: 150, text: 'focus on alpha now' }],
     staged: [
-      { when: '', send: 'run the steps', immediate: true },
-      { when: 'step-one', send: 'focus on alpha now' },
-      { when: 'step-two', send: 'focus on alpha now' },
-      { when: 'step-two', send: 'focus on alpha now' },
-      { when: 'STEER-SEEN', send: '' }
+      { when: '', send: 'run the steps', immediate: true }
     ]
   });
-  check('steering: mid-task note reaches the agent', code === 0 && out.includes('STEER-SEEN') && out.includes('steer:'), out.slice(-400));
+  check('steering: mid-task note interrupts and reaches the agent', code === 0 && out.includes('STEER-SEEN') && out.includes('applying your steer'), out.slice(-400));
   server.close();
 }
 
@@ -613,7 +633,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow' }), { mode: 0o600 });
   const work = fs.mkdtempSync(path.join(TMP, 'persist-'));
   await run([], { cwd: work, input: 'CHECKPOINT-SENTINEL marker task\n/exit\n' });
-  const { code, out } = await run([], { cwd: work, input: '/resume\n1\nwhat did we do\n/exit\n' });
+  const { code, out } = await run([], { cwd: work, input: '/resume\n\nwhat did we do\n/exit\n' });
   check('session: /resume restores saved history', code === 0 && out.includes('RESUME-CONTEXT-OK') && out.includes('Resumed'), out.slice(-400));
   server.close();
 }
@@ -712,6 +732,34 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const { code, out } = await run([], { input: '/status\n/depth short\n/depth\n/exit\n' });
   check('session: /status shows tokens/perms/model', out.includes('Status') && out.includes('tokens') && out.includes('edit:ask'), out.slice(-400));
   check('session: /depth short|deep', out.includes('Explanation depth: short') && out.includes('results only'), out.slice(-300));
+  server.close();
+}
+
+// ── filesystem tools (#23-24): exists/copy/move/metadata/range/search_files ──
+{
+  const { code, out, work } = await oneShot('files', 'do file ops', {}, w => fs.writeFileSync(path.join(w, 'a.txt'), 'alpha beta'));
+  check('file tools: exists/copy/move/metadata/range/search', code === 0 && out.includes('FILES-VERIFIED') && fs.existsSync(path.join(work, 'c.txt')), out.slice(-400));
+}
+
+// ── worker role enforcement: research worker cannot write (#16 execution-time) ──
+{
+  const { code, out } = await oneShot('workerjail', 'delegate writing', {});
+  check('worker jail: research worker blocked from write_file at execution', code === 0 && out.includes('WORKERJAIL-VERIFIED'), out.slice(-400));
+}
+
+// ── /new and /resume with time codes ──
+{
+  const { server, port } = await mock('resume');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const work = fs.mkdtempSync(path.join(TMP, 'codes-'));
+  await run([], { cwd: work, input: 'CHECKPOINT-SENTINEL marker task\n/exit\n' });
+  const list = fs.readdirSync(path.join(CFG, 'sessions')).filter(f => f.endsWith('.json'));
+  const code1 = list[0].replace('.json', '');
+  const { code, out } = await run([], { cwd: work, input: `/resume ${code1}\nwhat was it\n/exit\n` });
+  check('session: /resume by time code', code === 0 && out.includes(`Resumed ${code1}`) && out.includes('RESUME-CONTEXT-OK'), out.slice(-400));
+  const { code: c2, out: o2 } = await run([], { cwd: work, input: '/new\nCHECKPOINT-SENTINEL marker task two\n/exit\n' });
+  check('session: /new starts clean (old kept)', c2 === 0 && o2.includes('New session started'), o2.slice(-200));
   server.close();
 }
 

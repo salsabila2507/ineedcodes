@@ -130,6 +130,48 @@ export const TOOLS = [
     web: true
   },
   {
+    name: 'read_file_range',
+    description: 'Read part of a file by line numbers (1-based). For big files.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'number', description: 'first line, default 1' }, limit: { type: 'number', description: 'lines to read, default 200' } }, required: ['path'] },
+    allowedInPlan: true
+  },
+  {
+    name: 'file_exists',
+    description: 'Check whether a path exists.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    allowedInPlan: true
+  },
+  {
+    name: 'file_metadata',
+    description: 'Size, modified time, and type of a file.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    allowedInPlan: true
+  },
+  {
+    name: 'copy_file',
+    description: 'Copy a file to a new path.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, to: { type: 'string' } }, required: ['path', 'to'] },
+    allowedInPlan: false
+  },
+  {
+    name: 'move_file',
+    description: 'Move or rename a file.',
+    parameters: { type: 'object', properties: { path: { type: 'string' }, to: { type: 'string' } }, required: ['path', 'to'] },
+    allowedInPlan: false
+  },
+  {
+    name: 'search_files',
+    description: 'Find files whose NAME contains a string (recursive).',
+    parameters: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } }, required: ['pattern'] },
+    allowedInPlan: true
+  },
+  {
+    name: 'list_tracked_files',
+    description: 'List files tracked by git in this repository.',
+    parameters: { type: 'object', properties: {} },
+    allowedInPlan: true
+  },
+  {
     name: 'shell',
     description: 'Run a shell command in the working directory. Returns exit code with stdout and stderr.',
     parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
@@ -207,6 +249,59 @@ export function runTool(name, input, cwd) {
     if (name === 'delete_file') {
       fs.unlinkSync(abs);
       return { output: `Deleted ${path.relative(cwd, abs)}.` };
+    }
+    if (name === 'read_file_range') {
+      if (isSecret(abs)) return { output: 'Refused: that looks like a secret file, and secrets never enter the model context.' };
+      const all = fs.readFileSync(abs, 'utf8').split('\n');
+      const offset = Math.max(1, Number(input.offset ?? 1));
+      const limit = Math.max(1, Math.min(2_000, Number(input.limit ?? 200)));
+      const slice = all.slice(offset - 1, offset - 1 + limit);
+      const numbered = slice.map((l, i) => `${offset + i}: ${l}`).join('\n');
+      return { output: `${abs} lines ${offset}-${offset + slice.length - 1} of ${all.length}\n${numbered.slice(0, 60_000)}` };
+    }
+    if (name === 'file_exists') {
+      return { output: fs.existsSync(abs) ? `yes: ${path.relative(cwd, abs)}` : `no: ${path.relative(cwd, abs)}` };
+    }
+    if (name === 'file_metadata') {
+      const st = fs.statSync(abs);
+      return { output: `${path.relative(cwd, abs)}\nsize: ${st.size} bytes\n${st.isDirectory() ? 'directory' : 'file'}\nmodified: ${st.mtime.toISOString()}` };
+    }
+    if (name === 'copy_file') {
+      const dest = path.resolve(cwd, String(input.to ?? ''));
+      if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      fs.copyFileSync(abs, dest);
+      return { output: `Copied ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}.` };
+    }
+    if (name === 'move_file') {
+      const dest = path.resolve(cwd, String(input.to ?? ''));
+      if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      fs.renameSync(abs, dest);
+      return { output: `Moved ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}.` };
+    }
+    if (name === 'search_files') {
+      const pattern = String(input.pattern ?? '').toLowerCase();
+      if (!pattern) return { output: 'Error: empty pattern.' };
+      const out = [];
+      const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache']);
+      (function walk(d, depth) {
+        if (out.length >= 100 || depth > 5) return;
+        let entries;
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (out.length >= 100) return;
+          if (skip.has(e.name)) continue;
+          const p = path.join(d, e.name);
+          if (e.name.toLowerCase().includes(pattern)) out.push(path.relative(cwd, p) + (e.isDirectory() ? '/' : ''));
+          if (e.isDirectory()) walk(p, depth + 1);
+        }
+      })(abs, 0);
+      return { output: out.length ? out.join('\n') : '(no matches)' };
+    }
+    if (name === 'list_tracked_files') {
+      const g = spawnSync('git', ['ls-files'], { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+      if (g.status !== 0) return { output: 'Error: not a git repository (or git unavailable).' };
+      const files = g.stdout.split('\n').filter(Boolean);
+      return { output: files.length ? files.slice(0, 500).join('\n') + (files.length > 500 ? `\n(+${files.length - 500} more)` : '') : '(no tracked files)' };
     }
     return { output: `Unknown tool: ${name}` };
   } catch (err) {

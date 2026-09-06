@@ -18,6 +18,17 @@ export const trunc = (s, n = 120) => {
   return o.length > n ? o.slice(0, n - 1) + '...' : o;
 };
 
+// Terminal-safe markdown: **bold** becomes ANSI bold (or disappears without color),
+// headers lose their hashes. Files keep their markdown; only the screen is cleaned.
+export const mdTerm = t => {
+  let s = String(t);
+  if (USE_COLOR) s = s.replace(/\*\*([^*\n]+)\*\*/g, `\x1b[1m$1\x1b[0m`);
+  else s = s.replace(/\*\*([^*\n]+)\*\*/g, '$1');
+  s = s.replace(/(^|\n)#{1,6} /g, '$1');
+  s = s.replace(/\*([^*\n]+)\*/g, '$1');
+  return s;
+};
+
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
 // Rounded box around lines. Width follows the longest line, capped to the terminal.
