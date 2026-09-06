@@ -462,7 +462,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           green(bold('Welcome to ineed!')),
           '  You are all set: any OpenAI-compatible provider, any folder.',
           '  Type what you want in normal language, for example:',
-          dim('    "buatkan landing page beranimasi di folder ini"'),
+          dim('    "create an animated landing page in this folder"'),
           dim('    "fix the failing tests and tell me what was wrong"'),
           dim('    "explain this repository like I am a beginner"'),
           '  ' + dim('Helpers: /help commands · /perm auto or safe · /model · /memory on|off')

@@ -63,7 +63,7 @@ function humanizeHtmlTextNodes(html, fn) {
 
 async function humanizeWithModel(cfg, text, kind, signal) {
   const prompt = (kind === 'html'
-    ? `Below is the text content of an HTML page. Rewrite ONLY the marketing copy so it reads like a human wrote it: drop AI cliches ("game-changer", "cutting-edge", "unlock", "seamless"), filler openers, and excessive enthusiasm. Never use em dashes. Keep the message, facts, product names, numbers, and language (id vs en) exactly. Reply with ONLY the rewritten text, same line structure. If nothing needs changing, reply with the text unchanged.`
+    ? `Below is the text content of an HTML page. Rewrite ONLY the marketing copy so it reads like a human wrote it: drop AI cliches ("game-changer", "cutting-edge", "unlock", "seamless"), filler openers, and excessive enthusiasm. Never use em dashes. Keep the message, facts, product names, numbers, and the original language exactly. Reply with ONLY the rewritten text, same line structure. If nothing needs changing, reply with the text unchanged.`
     : `Rewrite the text below so it reads like a human wrote it: drop AI cliches and filler, keep it natural and direct. Never use em dashes. Keep the message, facts, names, numbers, and language exactly. Keep the same line structure. Reply with ONLY the rewritten text. If nothing needs changing, reply with it unchanged.`)
     + `\n---\n${text.slice(0, 8000)}`;
   const msg = await chat({ ...cfg, reasoning: 'low' }, [{ role: 'user', content: prompt }], undefined, signal);
