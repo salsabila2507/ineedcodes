@@ -26,7 +26,7 @@ export function listSessions() {
     return fs.readdirSync(DIR)
       .filter(f => f.endsWith('.json'))
       .map(f => { try { return JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')); } catch { return null; } })
-      .filter(Boolean)
+      .filter(Boolean).filter(s => (s.history?.length ?? 0) > 0)
       .sort((a, b) => b.time - a.time)
       .slice(0, 20);
   } catch { return []; }

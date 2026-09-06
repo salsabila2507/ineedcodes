@@ -85,6 +85,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
+  var tuiReady = false;
 
   // ONE readline, ONE line dispatcher for the whole session
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -131,6 +132,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let streamFlushTimer = null;
   let streamFlushedCount = 0;
   let streamBaseLines = null;
+  const chatLines = [];
 
   function flushStreamed() {
     if (!TUI || !lastStreamedForHooks) return;
@@ -170,7 +172,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onAgentEnd: (id, r) => { stop(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
       onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
       onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
-        onNote: note => { stop(); say(dim('  ◇ ' + note)); },
+        onNote: note => { stop(); if (note.includes('applying your steer')) { lastStreamedForHooks = ''; streamFlushedCount = 0; streamBaseLines = null; if (typeof tuiReady !== 'undefined' && tuiReady) { chatLines.length = 0; redrawChat(); } } say(dim('  ◇ ' + note)); },
         onUsage: u => { usage = u; if (TUI) drawStatus(); },
         drainSteer: () => steerQueue.splice(0),
       onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
@@ -607,7 +609,6 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   // ── full TUI mode ──
-  const chatLines = [];           // completed chat lines (ANSI strings)
   let chatTop = 0, chatBot = 0;   // scroll region rows
   let statusRow = 0;
 
