@@ -34,9 +34,23 @@ function parseFrontmatter(raw) {
   const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return null;
   const meta = {};
-  for (const line of m[1].split('\n')) {
-    const kv = line.match(/^(\w+):\s*(.+)$/);
-    if (kv) meta[kv[1]] = kv[2].trim();
+  const lines = m[1].split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^(\w+):\s*(.*)$/);
+    if (!kv) continue;
+    // folded scalar (>-, >): join the indented continuation lines into one paragraph
+    if (/^(description|summary)$/.test(kv[1]) && ['', '>-', '>', '|', '|-'].includes(kv[2])) {
+      const parts = [];
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        if (/^\S/.test(lines[j])) break;
+        parts.push(lines[j].trim());
+      }
+      meta[kv[1]] = parts.join(' ').trim();
+      i = j - 1;
+      continue;
+    }
+    meta[kv[1]] = kv[2].trim();
   }
   if (!meta.name) return null;
   return {

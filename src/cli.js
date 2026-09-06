@@ -3,6 +3,9 @@
 // First open asks for provider setup. After that, just say what you want.
 
 import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const [MAJOR] = process.versions.node.split('.').map(Number);
 if (!(MAJOR >= 20)) {
@@ -27,11 +30,40 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
 
   ${green('ineed')}                        interactive session (first open: setup)
   ${green('ineed "fix the build errors"')}  one-shot task
+  ${green('ineed unlock')}                 enable gated skills on this machine
   ${green('ineed --reset')}                 redo provider setup
   ${green('ineed --version')}               show version
 
 Inside a session, ${dim('/help')} lists the shortcuts. Or just talk to it.
 `);
+  process.exit(0);
+}
+
+// unlock: store the developer keyword locally so gated security skills activate here
+if (args[0] === 'unlock') {
+  const readline = await import('node:readline');
+  const { makeInput, dim, gray } = await import('./ui.js');
+  const keywordDir = process.env.INEED_CONFIG_DIR || path.join(os.homedir(), '.ineedcodes');
+  const keywordFile = path.join(keywordDir, 'keyword');
+  const given = args[1];
+  let keyword = '';
+  if (given) {
+    keyword = given.trim();
+  } else {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = makeInput(rl);
+    keyword = (await ask('Developer keyword: ', { secret: true })).trim();
+    rl.close();
+  }
+  if (!keyword) {
+    console.error(red('No keyword given. Nothing saved.'));
+    process.exit(1);
+  }
+  fs.mkdirSync(keywordDir, { recursive: true });
+  fs.writeFileSync(keywordFile, keyword, { mode: 0o600 });
+  try { fs.chmodSync(keywordFile, 0o600); } catch {}
+  console.log(green('Gated skills unlocked on this machine.'));
+  console.log(dim('Saved to ' + keywordFile + ' (0600). Use them by mentioning the keyword in a task, e.g. /skills or "use the sqli skill".'));
   process.exit(0);
 }
 

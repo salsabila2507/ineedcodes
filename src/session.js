@@ -12,7 +12,7 @@ import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
 import { spawnSync } from 'node:child_process';
 import { mcpConfigured } from './mcp.js';
-import { listSkills, findSkill } from './skills.js';
+import { listSkills, findSkill, devKeyword } from './skills.js';
 
 function currentBranch(cwd) {
   const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' });
@@ -483,10 +483,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         else say(red(`No skill named ${arg}.`));
         return;
       }
-      const all = listSkills(process.cwd(), input);
-      const gated = all.filter(s => s.gated).length;
+      const machineUnlocked = devKeyword() !== '';
+      const all = listSkills(process.cwd(), machineUnlocked ? devKeyword() : input);
+      const gated = machineUnlocked ? all.filter(x => x.gated).length : -1;
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
-      if (gated) say(dim(`  (+${gated} gated security skills)`));
+      if (gated > 0) say(dim(`  (+${gated} gated security skills unlocked on this machine)`));
+      else if (!machineUnlocked) say(dim(`  gated security skills are locked on this machine - run ${bold('ineed unlock')} to enable`));
       return;
     }
     if (input === '/new') {
