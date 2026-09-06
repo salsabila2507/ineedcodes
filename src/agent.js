@@ -169,7 +169,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const workerPrefix = extra.worker ? `You are ${extra.worker.id} (${extra.worker.role} worker) spawned by the lead agent. ${extra.worker.prompt}\n` : '';
   const projectInstructions = extra.worker ? '' : loadProjectInstructions(cwd);
   const depthNote = extra.worker ? '' : (cfg.explain === 'short' ? '\nAnswer style: short. Give results, skip explanations unless asked.' : cfg.explain === 'deep' ? '\nAnswer style: deep. Include reasoning, trade-offs, and what you ruled out.' : '');
-  const skills = extra.worker ? [] : listSkills(cwd);
+  const skills = extra.worker ? [] : listSkills(cwd, objective);
   const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
   const invokedSkill = !extra.worker
     ? skills.find(s => new RegExp(`\\b${s.name}\\b`, 'i').test(objective) && /humanize|skill|pakai|gunakan|use/i.test(objective))

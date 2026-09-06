@@ -13,6 +13,15 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ineed-smoke-'));
 const CFG = path.join(TMP, 'cfg');
 const SECRET = 'sk-mock-secret-key-12345';
 
+function listSessionsHelper() {
+  const dir = path.join(CFG, 'sessions');
+  try {
+    return fs.readdirSync(dir).filter(f => f.endsWith('.json'))
+      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return null; } })
+      .filter(Boolean).sort((a, b) => b.time - a.time);
+  } catch { return []; }
+}
+
 let passed = 0, failed = 0;
 const check = (name, ok, detail = '') => {
   if (ok) { passed++; console.log('  ok  ' + name); }
@@ -174,6 +183,11 @@ function mock(script) {
           resp = reply(sys.includes('PROJECT-RULE-SENTINEL') ? 'AGENTSMD-LOADED' : 'AGENTSMD-MISSING');
           break;
         }
+        case 'gate': {
+          const sys = String(msgs[0]?.content ?? '');
+          resp = reply(sys.includes('sqli-sql-injection') ? 'GATE-UNLOCKED' : 'GATE-LOCKED');
+          break;
+        }
         case 'skill': {
           const user = String(msgs[msgs.length - 1]?.content ?? '');
           const skillsListed = String(msgs[0]?.content ?? '').includes('humanizer (builtin)');
@@ -286,7 +300,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.6.1'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -446,7 +460,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.6.1'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.0'), out);
   server.close();
 }
 
@@ -754,13 +768,23 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
   const work = fs.mkdtempSync(path.join(TMP, 'codes-'));
   await run([], { cwd: work, input: 'CHECKPOINT-SENTINEL marker task\n/exit\n' });
-  const list = fs.readdirSync(path.join(CFG, 'sessions')).filter(f => f.endsWith('.json'));
-  const code1 = list[0].replace('.json', '');
+  const sessions = listSessionsHelper().filter(s => JSON.stringify(s.history ?? []).includes('CHECKPOINT-SENTINEL'));
+  const code1 = sessions[0].id;
   const { code, out } = await run([], { cwd: work, input: `/resume ${code1}\nwhat was it\n/exit\n` });
   check('session: /resume by time code', code === 0 && out.includes(`Resumed ${code1}`) && out.includes('RESUME-CONTEXT-OK'), out.slice(-400));
   const { code: c2, out: o2 } = await run([], { cwd: work, input: '/new\nCHECKPOINT-SENTINEL marker task two\n/exit\n' });
   check('session: /new starts clean (old kept)', c2 === 0 && o2.includes('New session started'), o2.slice(-200));
   server.close();
+}
+
+// ── gated security skills: unlock only with the developer keyword ──
+{
+  const { code, out } = await oneShot('gate', 'use the sqli-sql-injection skill 0xyas051191');
+  check('gated skills: developer keyword unlocks them', code === 0 && out.includes('GATE-UNLOCKED'), out.slice(-300));
+}
+{
+  const { code, out } = await oneShot('gate', 'use the sqli-sql-injection skill');
+  check('gated skills: hidden without the keyword', code === 0 && out.includes('GATE-LOCKED'), out.slice(-300));
 }
 
 // ── no em dash anywhere in shipped source ──

@@ -1,6 +1,6 @@
 {
   "name": "ineedcodes",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "Your terminal, now autonomous. Just say what you want, ineed does the rest.",
   "license": "MIT",
   "type": "module",
@@ -9,6 +9,7 @@
   },
   "files": [
     "src",
+    "skills",
     "README.md",
     "LICENSE"
   ],

@@ -21,12 +21,15 @@ execSync('npm pack --pack-destination ' + JSON.stringify(TMP), { cwd: ROOT, stdi
 const tarball = fs.readdirSync(TMP).find(f => f.endsWith('.tgz'));
 check('npm pack produces tarball', Boolean(tarball));
 
-// 2. tarball contents: exactly what ships
+// 2. tarball contents: runtime + gated skills (any extra reference docs are fine)
 const listing = execSync('tar -tzf ' + path.join(TMP, tarball), { encoding: 'utf8' });
 const files = listing.trim().split('\n').map(f => f.replace(/^package\//, '')).filter(f => f && !f.endsWith('/'));
-const expected = ['LICENSE', 'README.md', 'package.json', ...fs.readdirSync(path.join(ROOT, 'src')).map(f => 'src/' + f)];
+const expected = ['LICENSE', 'README.md', 'package.json',
+  ...fs.readdirSync(path.join(ROOT, 'src')).map(f => 'src/' + f),
+  ...fs.readdirSync(path.join(ROOT, 'skills')).map(f => 'skills/' + f + '/SKILL.md')
+];
 const missing = expected.filter(f => !files.includes(f));
-const extra = files.filter(f => !expected.includes(f));
+const extra = files.filter(f => !expected.includes(f) && !f.startsWith('skills/'));
 check('tarball has all runtime files', missing.length === 0, 'missing: ' + missing.join(', '));
 check('tarball has no junk', extra.length === 0, 'extra: ' + extra.join(', '));
 
@@ -38,7 +41,7 @@ execSync(`npm install --prefix ${JSON.stringify(prefix)} --no-audit --no-fund --
 const bin = path.join(prefix, 'node_modules', '.bin', 'ineed');
 check('installed bin exists and is executable', fs.existsSync(bin) && !!(fs.statSync(bin).mode & 0o111));
 const v = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000 });
-check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.6.1'), v.stdout + v.stderr);
+check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.7.0'), v.stdout + v.stderr);
 const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000 });
 check('installed bin --help works', h.status === 0 && h.stdout.includes('one-shot task'), h.stdout + h.stderr);
 
