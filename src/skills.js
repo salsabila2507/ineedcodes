@@ -3,8 +3,9 @@
 // Frontmatter: name, description, tools (optional restriction), instructions body below.
 //
 // GATED SKILLS: SKILL.md files whose frontmatter carries "gated: true" stay invisible
-// unless the user includes the developer keyword 0xyas051191 in their message. The keyword
-// is checked against the raw objective text, so it never ships enabled by accident.
+// unless the objective text contains the developer keyword. The keyword itself lives
+// OUTSIDE this repository: in the INEED_DEV_KEYWORD environment variable or in
+// ~/.ineedcodes/keyword (chmod 600). A fresh install cannot unlock gated skills.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -13,7 +14,12 @@ import { fileURLToPath } from 'node:url';
 import * as url from 'node:url';
 const PKG_SKILLS = path.join(path.dirname(url.fileURLToPath(import.meta.url)), '..', 'skills');
 
-export const DEV_KEYWORD = '0xyas051191';
+const KEYWORD_FILE = path.join(CONFIG_DIR, 'keyword');
+
+export function devKeyword() {
+  if (process.env.INEED_DEV_KEYWORD) return String(process.env.INEED_DEV_KEYWORD).trim();
+  try { return fs.readFileSync(KEYWORD_FILE, 'utf8').trim(); } catch { return ''; }
+}
 
 const BUILTIN = [
   {
@@ -56,8 +62,9 @@ function loadDir(dir, scope, out, forceGated = false) {
 }
 
 function isUnlocked(objective) {
-  if (!objective) return false;
-  return String(objective).includes(DEV_KEYWORD);
+  const kw = devKeyword();
+  if (!kw || !objective) return false;
+  return String(objective).includes(kw);
 }
 
 export function listSkills(cwd, objective = '') {

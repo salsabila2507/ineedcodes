@@ -12,6 +12,7 @@ const CLI = path.join(ROOT, 'src', 'cli.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ineed-smoke-'));
 const CFG = path.join(TMP, 'cfg');
 const SECRET = 'sk-mock-secret-key-12345';
+const TEST_KEYWORD = 'gate-test-' + Math.random().toString(36).slice(2, 8);
 
 function listSessionsHelper() {
   const dir = path.join(CFG, 'sessions');
@@ -273,7 +274,8 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
         ...process.env, INEED_CONFIG_DIR: CFG, NO_COLOR: '1',
         INEED_TEST_PORT: String(port), INEED_TEST_CFG: JSON.stringify(cfg),
         INEED_NO_MEMORY: memory ? '0' : '1', PATH: extraPath,
-        INEED_FRESH: fresh ? '1' : '0'
+        INEED_FRESH: fresh ? '1' : '0',
+        INEED_DEV_KEYWORD: TEST_KEYWORD
       }
     });
     let out = '';
@@ -779,7 +781,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 
 // ── gated security skills: unlock only with the developer keyword ──
 {
-  const { code, out } = await oneShot('gate', 'use the sqli-sql-injection skill 0xyas051191');
+  const { code, out } = await oneShot('gate', 'use the sqli-sql-injection skill ' + TEST_KEYWORD);
   check('gated skills: developer keyword unlocks them', code === 0 && out.includes('GATE-UNLOCKED'), out.slice(-300));
 }
 {

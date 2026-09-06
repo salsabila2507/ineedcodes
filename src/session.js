@@ -477,7 +477,6 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (input === '/skills' || input.startsWith('/skills ')) {
       const arg = input.slice(7).trim();
-      const unlocked = input.includes('0xyas051191') || (history.some(m => String(m.content).includes('0xyas051191')) && input.includes('0xyas051191'));
       if (arg) {
         const s = findSkill(arg, process.cwd(), input);
         if (s) { say(box([bold(`Skill ${s.name}`) + dim(` (${s.scope}${s.gated ? ', gated' : ''})`), s.description, '', dim('Instructions:'), s.instructions.slice(0, 1_500)])); say(dim('Say "use ' + s.name + ' to ..." and the agent follows them.')); }
@@ -487,7 +486,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const all = listSkills(process.cwd(), input);
       const gated = all.filter(s => s.gated).length;
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
-      if (gated) say(dim(`  (+${gated} gated security skills: mention 0xyas051191 in a task to unlock)`));
+      if (gated) say(dim(`  (+${gated} gated security skills)`));
       return;
     }
     if (input === '/new') {
