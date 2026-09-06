@@ -505,6 +505,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         if (s?.history?.length) {
           history = s.history;
           sessionId = s.id;
+          renderHistory(s.history);
           say(green(`Resumed ${s.id} (${Math.floor(s.history.length / 2)} turns). Continue where we left off.`));
         } else say(red(`No session with code ${codeArg}. Check /resume for the list of codes.`));
         busy = false;
@@ -519,6 +520,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (s?.history?.length) {
         history = s.history;
         sessionId = s.id;
+        renderHistory(s.history);
         say(green(`Resumed ${s.id} (${Math.floor(s.history.length / 2)} turns). Continue where we left off.`));
         if (TUI) redrawChat();
       } else say(red(`No session with code ${pick}. Check the list above.`));
@@ -645,14 +647,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   function redrawChat() {
-    for (let i = chatTop; i <= chatBot; i++) {
-      screen.at(i, 1);
-      screen.clearLine();
-    }
-    screen.at(chatTop, 1);
+    // build the whole frame in one buffer, then paint once: no flicker
     const vis = chatBot - chatTop + 1;
     const show = chatLines.slice(-vis);
-    process.stdout.write(show.join('\r\n'));
+    let buf = '';
+    for (let i = 0; i < vis; i++) {
+      buf += `\x1b[${chatTop + i};1H\x1b[2K` + (show[i] ?? '');
+    }
+    process.stdout.write(buf);
     scrollRegion();
   }
 
@@ -661,10 +663,29 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     redrawChat();
   }
 
-  const tuiUserLine = input => {
+  function renderHistory(h) {
+    if (!TUI) {
+      for (const m of h) {
+        const c = String(m.content ?? '').replaceAll('\n', ' ').slice(0, 90);
+        if (c) console.log('  ' + gray((m.role === 'user' ? 'you: ' : 'ineed: ') + c));
+      }
+      return;
+    }
+    if (!tuiReady) return;
+    setTimeout(() => {
+      for (const m of h) {
+        if (m.role === 'user') tuiUserLine(String(m.content ?? ''));
+        else if (m.content) tuiPrint(box([dim('  (earlier) ') + trunc(String(m.content).replaceAll('\n', ' '), 90)]));
+      }
+      drawStatus();
+      scrollRegion();
+    }, 0);
+  }
+
+  function tuiUserLine(input) {
     for (const l of wrapLines(userBubble(input), Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
     redrawChat();
-  };
+  }
 
   const layout = () => {
     const rows = process.stdout.rows || 24;
@@ -681,6 +702,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   };
 
   rl.on('resize', layout);
+
+  // typed-ahead input while busy: echo it above the status bar so the user sees what they type
+  let typedAhead = '';
+  rl.on('keypress', (ch, key) => {
+    if (!busy || !key) return;
+    if (key.name === 'backspace') typedAhead = typedAhead.slice(0, -1);
+    else if (key.name === 'return') typedAhead = '';
+    else if (key.ctrl || !ch || ch < ' ') return;
+    else typedAhead += ch;
+    process.stdout.write(`\x1b[${statusRow - 1};1H\x1b[2K` + dim('  you: ') + typedAhead);
+    scrollRegion();
+  });
 
   // keep Ctrl+Z from suspending us in raw mode: swallow the key, tell the user
   const origWrite = rl.write.bind(rl);
