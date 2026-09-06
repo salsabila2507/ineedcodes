@@ -77,7 +77,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const pendingLines = [];
   const steerQueue = [];      // notes typed while a task runs, injected mid-task
 
-  const TUI = process.stdout.isTTY && !process.env.NO_COLOR;
+  // Full-screen TUI: great in ANSI terminals (Linux/macOS/Windows Terminal), but
+  // legacy Windows consoles garble alt-screen sequences. Auto: on everywhere except
+  // win32; force with config "tui": true, disable with "tui": false.
+  const TUI = process.stdout.isTTY && !process.env.NO_COLOR
+    && (state.tui === true || (state.tui === null && process.platform !== 'win32'));
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
@@ -86,6 +90,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let handleRef = null;
   const ask = makeInput(rl, l => handleRef?.(l));
+  // EOF (Ctrl+D or closed pipe): exit cleanly, unless a task is still running
+  rl.on('close', () => {
+    if (!busy) doExit();
+    else {
+      const wait = setInterval(() => { if (!busy) { clearInterval(wait); doExit(); } }, 200);
+      setTimeout(() => { clearInterval(wait); doExit(); }, 30_000);
+    }
+  });
 
   const say = TUI ? lines => tuiPrint(lines) : (lines => console.log(lines));
 
@@ -116,6 +128,17 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   let lastStreamedForHooks = '';
+  let streamFlushTimer = null;
+  let streamFlushedCount = 0;
+  let streamBaseLines = null;
+
+  function flushStreamed() {
+    if (!TUI || !lastStreamedForHooks) return;
+    if (streamBaseLines === null) streamBaseLines = chatLines.length;
+    chatLines.length = streamBaseLines; // re-render the growing answer in place
+    for (const l of wrapLines(lastStreamedForHooks, Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
+    redrawChat();
+  }
 
   function hooksForRun(stopSpinner) {
     let spinner = null;
@@ -132,7 +155,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onResult: out => { say(gray('    ' + trunc(out, 110))); },
       onText: t => { stop(); },
       onDelta: chunk => {
-        if (TUI) { process.stdout.write(chunk); lastStreamedForHooks += chunk; }
+        // stream into the chat buffer; the full text lands on flushStreamed()
+        lastStreamedForHooks += chunk;
+        if (TUI && !streamFlushTimer) {
+          streamFlushTimer = setTimeout(() => { streamFlushTimer = null; flushStreamed(); }, 120);
+        }
       },
       onTodos: list => {
         stop();
@@ -174,6 +201,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   async function runTask(input) {
     busy = true;
     lastStreamedForHooks = '';
+    streamFlushedCount = 0;
     if (TUI) tuiUserLine(input);
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
@@ -609,10 +637,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     redrawChat();
   }
 
-  function tuiUserLine(input) {
+  const tuiUserLine = input => {
     for (const l of wrapLines(userBubble(input), Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
     redrawChat();
-  }
+  };
 
   const layout = () => {
     const rows = process.stdout.rows || 24;

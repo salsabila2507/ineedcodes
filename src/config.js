@@ -26,6 +26,7 @@ export function normalize(c) {
     mode: c.mode === 'plan' ? 'plan' : 'build',
     memory: c.memory !== false,
     mcp: c.mcp !== false,
+    tui: c.tui === true ? true : c.tui === false ? false : null,
     humanize: c.humanize !== false,
     stream: c.stream === true,
     searchUrl: c.searchUrl ? String(c.searchUrl) : '',
