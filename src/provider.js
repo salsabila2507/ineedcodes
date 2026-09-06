@@ -30,9 +30,10 @@ export async function fetchModels(cfg, signal) {
   return [...new Set(ids)];
 }
 
-export async function chat(cfg, messages, tools, signal) {
+export async function chat(cfg, messages, tools, signal, onDelta) {
   const body = { model: cfg.model, messages, temperature: 0.2 };
   if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
+  if (cfg.stream === true) body.stream = true;
   if (tools?.length) body.tools = tools.map(t => ({
     type: 'function',
     function: { name: t.name, description: t.description, parameters: t.parameters }
@@ -65,15 +66,74 @@ export async function chat(cfg, messages, tools, signal) {
     // provider does not know reasoning_effort: retry once without it
     if (body.reasoning_effort && (res.status === 400 || res.status === 422)) {
       delete body.reasoning_effort;
+      delete body.stream;
       const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!retry.ok) throw new Error(`HTTP ${retry.status}: ${(await retry.text()).slice(0, 200)}`);
       return parseMessage(await retry.json());
     }
+    // provider does not stream: fall back to a plain call instead of failing
+    if (body.stream && (res.status === 400 || res.status === 404 || res.status === 422)) {
+      delete body.stream;
+      res = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      return parseMessage(await res.json());
+    }
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
+  if (body.stream) return readStream(res, onDelta);
   return parseMessage(await res.json());
 }
 
+// SSE stream: accumulate content and tool_calls, emit text deltas as they arrive.
+async function readStream(res, onDelta) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  const toolCalls = [];
+  let usage = null;
+  let role = 'assistant';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      let ev;
+      try { ev = JSON.parse(payload); } catch { continue; }
+      if (ev.usage) usage = ev.usage;
+      const d = ev.choices?.[0]?.delta;
+      if (!d) continue;
+      if (d.role) role = d.role;
+      if (d.content) {
+        content += d.content;
+        onDelta?.(d.content);
+      }
+      for (const tc of d.tool_calls ?? []) {
+        const i = tc.index ?? 0;
+        toolCalls[i] ??= { id: tc.id ?? ('call_' + i), type: 'function', function: { name: '', arguments: '' } };
+        if (tc.id) toolCalls[i].id = tc.id;
+        if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
+        if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
+      }
+    }
+  }
+  const msg = { role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
+  if (usage) msg._usage = { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 };
+  return msg;
+}
+
 function parseMessage(json) {
-  return json.choices?.[0]?.message ?? { role: 'assistant', content: '', tool_calls: [] };
+  const msg = json.choices?.[0]?.message ?? { role: 'assistant', content: '', tool_calls: [] };
+  // surface token usage when the provider returns it (OpenAI-style usage block)
+  if (json.usage) msg._usage = {
+    input: json.usage.prompt_tokens ?? 0,
+    output: json.usage.completion_tokens ?? 0
+  };
+  return msg;
 }

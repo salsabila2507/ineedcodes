@@ -10,8 +10,14 @@ import { wizard } from './wizard.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
 import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
+import { spawnSync } from 'node:child_process';
 import { mcpConfigured } from './mcp.js';
 import { listSkills, findSkill } from './skills.js';
+
+function currentBranch(cwd) {
+  const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -20,7 +26,7 @@ const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 const COMPACT_CHARS = 24_000;
 async function compactHistory(cfg, history, hooks = {}) {
   const size = history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0);
-  if (size < COMPACT_CHARS || history.length < 6) return history;
+  if ((!hooks.force && size < COMPACT_CHARS) || history.length < 6) return history;
   const cut = Math.floor(history.length / 2);
   const old = history.slice(0, cut);
   const rest = history.slice(cut);
@@ -74,6 +80,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const TUI = process.stdout.isTTY && !process.env.NO_COLOR;
   let sessionId = null;
   let lastBoost = null;
+  let usage = { input: 0, output: 0 };
 
   // ONE readline, ONE line dispatcher for the whole session
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -108,6 +115,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (TUI) drawStatus();
   }
 
+  let lastStreamedForHooks = '';
+
   function hooksForRun(stopSpinner) {
     let spinner = null;
     const stop = () => { spinner?.stop(); spinner = null; };
@@ -122,6 +131,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onTool: (name, input2) => { stop(); say(cyan('  ● ' + name) + gray(' ' + trunc(JSON.stringify(input2), 90))); },
       onResult: out => { say(gray('    ' + trunc(out, 110))); },
       onText: t => { stop(); },
+      onDelta: chunk => {
+        if (TUI) { process.stdout.write(chunk); lastStreamedForHooks += chunk; }
+      },
       onTodos: list => {
         stop();
         const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
@@ -131,8 +143,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onAgentEnd: (id, r) => { stop(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
       onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
       onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
-      onNote: note => { stop(); say(dim('  ◇ ' + note)); },
-      drainSteer: () => steerQueue.splice(0),
+        onNote: note => { stop(); say(dim('  ◇ ' + note)); },
+        onUsage: u => { usage = u; if (TUI) drawStatus(); },
+        drainSteer: () => steerQueue.splice(0),
       onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
       onApprove: async (cat, name, input2) => {
         stop();
@@ -160,11 +173,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   async function runTask(input) {
     busy = true;
+    lastStreamedForHooks = '';
     if (TUI) tuiUserLine(input);
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
+      if (lastStreamedForHooks && TUI) process.stdout.write('\n');
       history = pushTurn(history, input, res);
       stopSpinner();
       try { history = await compactHistory(state, history, { onNote: n => say(dim('  ◇ ' + n)) }); } catch {}
@@ -174,7 +189,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       } else {
         const rows = [green(bold('■ Done'))];
         if (res.changed?.length) rows.push(dim('  files: ') + res.changed.join(', '));
-        if (res.answer) String(res.answer).split('\n').slice(0, 14).forEach(l => rows.push('  ' + l));
+        const answerIsStreamed = lastStreamedForHooks && res.answer === lastStreamedForHooks;
+        if (res.answer && !answerIsStreamed) String(res.answer).split('\n').slice(0, 14).forEach(l => rows.push('  ' + l));
+        else if (answerIsStreamed) rows.push(dim('  (streamed above)'));
         else if (!res.changed?.length) rows.push(dim('  (no output)'));
         say(box(rows));
       }
@@ -214,6 +231,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/boost') + '    isolated git-worktree run: /boost <objective>');
       say('  ' + cyan('/config') + '   show provider config (key hidden)');
       say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
+      say('  ' + cyan('/status') + '   everything about this session at a glance');
+      say('  ' + cyan('/compact') + '  shrink the conversation into a checkpoint');
+      say('  ' + cyan('/depth') + '    answer depth: /depth short|normal|deep');
       say('  ' + cyan('/resume') + '   bring back a saved conversation');
       say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
@@ -309,6 +329,47 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(ok ? green('Memory: on') + dim(` via ${provider.name}.`) : yellow('Memory: provider not installed.') + dim(' Install icm to enable.'));
       busy = false;
       return afterTask();
+    }
+    if (input === '/status') {
+      say(box([
+        bold('Status'),
+        dim('model') + '      ' + state.model,
+        dim('mode') + '       ' + mode + dim(' / reasoning ' + state.reasoning + ' / depth ' + state.explain),
+        dim('perms') + '       edit:' + state.permEdit + ' shell:' + state.permShell + ' net:' + state.permNet,
+        dim('memory') + '      ' + (state.memory === false ? 'off' : 'on (icm)'),
+        dim('humanizer') + '   ' + (state.humanize === false ? 'off' : 'on'),
+        dim('mcp') + '        ' + (mcpConfigured() ? 'configured' : 'not configured'),
+        dim('tokens') + '      ' + (usage.input || usage.output ? usage.input + ' in / ' + usage.output + ' out' : '-'),
+        dim('session') + '     ' + (sessionId ?? 'not saved yet'),
+        dim('cwd') + '        ' + process.cwd()
+      ]));
+      return;
+    }
+    if (input === '/compact') {
+      busy = true;
+      say(dim('   Compacting conversation...'));
+      const before = history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0);
+      history = await compactHistory(state, history, { force: true, onNote: n => say(dim('  ◇ ' + n)) });
+      const after = history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0);
+      say(after < before ? green(`   Compact: ${(before / 1024).toFixed(1)}k -> ${(after / 1024).toFixed(1)}k chars.`) : dim('   Conversation too small to compact further.'));
+      busy = false;
+      return afterTask();
+    }
+    if (input === '/depth' || input.startsWith('/depth ')) {
+      const arg = input.split(/\s+/)[1];
+      if (['short', 'normal', 'deep'].includes(arg)) {
+        Object.assign(state, normalize({ ...state, explain: arg }));
+        saveConfig(state);
+        say(green('Explanation depth: ' + arg));
+      } else {
+        say(box([
+          bold('Explanation depth'),
+          dim('/depth short') + '   results only',
+          dim('/depth normal') + ' what changed and why (default)',
+          dim('/depth deep') + '   reasoning, trade-offs, ruled-out paths'
+        ]));
+      }
+      return;
     }
     if (input === '/humanizer' || input.startsWith('/humanizer ')) {
       const arg = input.split(/\s+/)[1];
@@ -452,7 +513,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   const plainPrompt = () => {
-    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))} ${green('❯')} `);
+    const branch = currentBranch(process.cwd());
+    const tok = usage.input || usage.output ? ` ${usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output} tok` : '';
+    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green('❯')} `);
     rl.prompt();
   };
 
@@ -509,9 +572,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   function drawStatus() {
     const cols = process.stdout.columns || 80;
-    const left = ` ${bold(green('ineed'))} ${dim(`v${VERSION}`)}`;
+    const branch = currentBranch(process.cwd());
+    const ctxK = (history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0) / 1024).toFixed(1) + 'k';
+    const tok = usage.input || usage.output ? ` ${dim(usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output + '')} tok` : '';
+    const left = ` ${bold(green('ineed'))} ${dim(`v${VERSION}`)}${branch ? ' ' + cyan('(' + branch + ')') : ''}`;
     const mid = ` ${dim(state.model)}`;
-    const right = ` ${mode === 'plan' ? yellow('plan') : green('build')} ${dim('/')} ${dim(state.reasoning)} ${dim('/')} ${state.memory === false ? dim('mem:off') : dim('mem:on')} `;
+    const right =
+      ` ${mode === 'plan' ? yellow('plan') : green('build')} ${dim('/')} ${dim(state.reasoning)}` +
+      ` ${dim('/')} ${dim(ctxK + ' ctx')}${tok}` +
+      ` ${dim('/')} ${dim('mem:' + (state.memory === false ? 'off' : 'on'))}` +
+      ` ${dim('/')} ${mode === 'plan' ? dim('perm') : state.permEdit === 'ask' ? green('perm:ask') : dim('perm:auto')} `;
     screen.at(statusRow, 1);
     screen.clearLine();
     process.stdout.write(dim('─'.repeat(Math.max(0, cols - plain(left).length - plain(mid).length - plain(right).length))) + left + mid + right);

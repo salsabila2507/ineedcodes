@@ -27,8 +27,15 @@ export function normalize(c) {
     memory: c.memory !== false,
     mcp: c.mcp !== false,
     humanize: c.humanize !== false,
+    stream: c.stream === true,
+    searchUrl: c.searchUrl ? String(c.searchUrl) : '',
+    explain: ['short', 'deep'].includes(c.explain) ? c.explain : 'normal',
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
-    permShell: c.permShell === 'allow' ? 'allow' : 'ask'
+    permShell: c.permShell === 'allow' ? 'allow' : 'ask',
+    permNet: c.permNet === 'ask' ? 'ask' : 'allow',
+    models: (c.models && typeof c.models === 'object' && !Array.isArray(c.models))
+      ? Object.fromEntries(Object.entries(c.models).map(([k, v]) => [k, String(v)]))
+      : {}
   };
 }
 

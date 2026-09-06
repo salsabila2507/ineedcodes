@@ -197,6 +197,25 @@ function mock(script) {
           else resp = reply(joined.includes('Search unavailable') ? 'WEBSEARCH-HONEST' : 'WEBSEARCH-BROKEN: ' + joined.slice(0, 120));
           break;
         }
+        case 'workermodel': {
+          const isWorker = String(msgs[0]?.content ?? '').includes('worker) spawned by the lead agent');
+          if (isWorker) resp = reply('WORKER-MODEL:' + parsed.model);
+          else if (hadTools) resp = reply(joined.includes('WORKER-MODEL:mock-fast') ? 'WORKERMODEL-VERIFIED' : 'WORKERMODEL-BROKEN: ' + joined.slice(0, 100));
+          else resp = call('spawn_agent', { role: 'research', objective: 'check the model' });
+          break;
+        }
+        case 'proc': {
+          if (!hadTools) resp = call('process_start', { name: 'srv', command: 'echo srv-started' });
+          else if (toolResults.length === 1) resp = call('process_status', {});
+          else if (toolResults.length === 2) resp = call('process_output', { name: 'srv' });
+          else if (toolResults.length === 3) resp = call('process_stop', { name: 'srv' });
+          else resp = reply(joined.includes('Started') && joined.includes('pid') && joined.includes('srv-started') && joined.includes('Stopped') ? 'PROC-VERIFIED' : 'PROC-BROKEN: ' + joined.slice(0, 200));
+          break;
+        }
+        case 'depth': {
+          resp = reply('DEPTH-ANSWER');
+          break;
+        }
         case 'boost':
           if (!hadTools) resp = call('write_file', { path: 'boost.txt', content: 'boosted by worker' });
           else resp = reply('BOOST-FILE-DONE');
@@ -244,7 +263,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.4.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.5.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -404,7 +423,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.4.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.5.0'), out);
   server.close();
 }
 
@@ -671,6 +690,29 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('web: search without provider reports honestly', c2 === 0 && o2.includes('WEBSEARCH-HONEST'), o2.slice(-300));
   wsrv.close();
   delete process.env.FAKE_WEB_PORT;
+}
+
+// ── multi-model per role (#30) ──
+{
+  const { code, out } = await oneShot('workermodel', 'delegate', { models: { research: 'mock-fast' } });
+  check('multi-model: research worker uses its own model', code === 0 && out.includes('WORKERMODEL-VERIFIED'), out.slice(-300));
+}
+
+// ── process tools (#25) ──
+{
+  const { code, out } = await oneShot('proc', 'start the server', { permShell: 'allow' });
+  check('process tools: start/status/output/stop lifecycle', code === 0 && out.includes('PROC-VERIFIED'), out.slice(-400));
+}
+
+// ── /status, /depth (#3, #38) ──
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { input: '/status\n/depth short\n/depth\n/exit\n' });
+  check('session: /status shows tokens/perms/model', out.includes('Status') && out.includes('tokens') && out.includes('edit:ask'), out.slice(-400));
+  check('session: /depth short|deep', out.includes('Explanation depth: short') && out.includes('results only'), out.slice(-300));
+  server.close();
 }
 
 // ── no em dash anywhere in shipped source ──

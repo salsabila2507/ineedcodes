@@ -3,6 +3,7 @@
 import { chat } from './provider.js';
 import { TOOLS, runTool, shellRun, isDestructive, GIT_TOOL_DEFS, runGitTool } from './tools.js';
 import { fetchUrl, webSearch } from './web.js';
+import { PROC_TOOL_DEFS, runProcTool } from './processes.js';
 import { trunc, gray, cyan, dim } from './ui.js';
 import { getMemoryProvider } from './memory.js';
 import * as path from 'node:path';
@@ -30,6 +31,8 @@ Rules:
 - Prefer targeted edits (edit_file) over full rewrites (write_file). Work only inside the current folder.
 - Never push to remotes or delete data without being asked.
 - Destructive commands are always blocked. Ask the user to run those themselves.
+- Explain to match the user's depth preference (short: results only; normal: what changed and why; deep: also the reasoning and trade-offs).
+- Suggest "boost" (isolated git-worktree run) when a task involves major refactoring, repeated failed fixes, or architecture changes, by telling the user to run /boost. Do not start it yourself.
 - Some actions need user approval. A tool result starting with "Denied" means the user said no: do not retry the same call, explain what you wanted instead.
 - For objectives with 3 or more steps, keep a checklist with the todo tool and update statuses as you go (in_progress for what you are doing now).
 - A "[steer from the user, newer than the objective]" message is a live steer: it is newer than the original objective. Adapt to it immediately; if it changes direction, change course without redoing finished work.
@@ -93,7 +96,8 @@ async function runWorker(cfg, spec, cwd, depth, hooks) {
     const res = await runObjective(cfg, objective, cwd, [], {}, {
       depth: depth + 1,
       toolFilter: role.tools,
-      worker: { id: spec.id, role: roleName, prompt: role.prompt }
+      worker: { id: spec.id, role: roleName, prompt: role.prompt },
+      modelOverride: cfg.models?.[roleName] ?? cfg.models?.worker ?? null
     });
     return { id: spec.id, role: roleName, status: res.aborted ? 'incomplete' : 'completed', summary: res.answer || '(no output)', files: res.changed, commands: res.ran };
   } catch (err) {
@@ -124,8 +128,11 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   let tools = plan ? TOOLS.filter(t => t.allowedInPlan) : [...TOOLS, SPAWN_TOOL];
   // first-class git wrappers (read ones always, mutating ones gated by permEdit)
   tools.push(...GIT_TOOL_DEFS.filter(t => plan ? !t.mutating : true));
+  // background process tools (build mode only)
+  if (!plan) tools.push(...PROC_TOOL_DEFS);
   if (extra.toolFilter) tools = tools.filter(t => (extra.toolFilter).includes(t.name));
   const canAsk = typeof hooks.onApprove === 'function';
+  const roleCfg = extra.modelOverride ? { ...cfg, model: extra.modelOverride } : cfg;
 
   // MCP: load configured servers once per top-level objective, expose their tools
   let mcpManager = null;
@@ -158,6 +165,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
 
   const workerPrefix = extra.worker ? `You are ${extra.worker.id} (${extra.worker.role} worker) spawned by the lead agent. ${extra.worker.prompt}\n` : '';
   const projectInstructions = extra.worker ? '' : loadProjectInstructions(cwd);
+  const depthNote = extra.worker ? '' : (cfg.explain === 'short' ? '\nAnswer style: short. Give results, skip explanations unless asked.' : cfg.explain === 'deep' ? '\nAnswer style: deep. Include reasoning, trade-offs, and what you ruled out.' : '');
   const skills = extra.worker ? [] : listSkills(cwd);
   const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
   const invokedSkill = !extra.worker
@@ -166,7 +174,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const messages = [
     {
       role: 'system',
-      content: `${workerPrefix ? workerPrefix + '\n' : ''}${SYSTEM}\nWorking directory: ${cwd}\nMode: ${plan ? 'plan (read only, suggest what to change, do not change anything)' : 'build'}`
+      content: `${workerPrefix ? workerPrefix + '\n' : ''}${SYSTEM}${depthNote}\nWorking directory: ${cwd}\nMode: ${plan ? 'plan (read only, suggest what to change, do not change anything)' : 'build'}`
         + (recalled ? `\nRelevant memory from previous sessions with this user (durable facts, may be stale):\n${recalled}` : '')
         + (projectInstructions ? `\nProject instructions for this repository (follow them):\n${projectInstructions}` : '')
         + skillsBlock
@@ -177,6 +185,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const changed = new Set();
   const ran = [];
   const todos = [];
+  const usage = { input: 0, output: 0 };
   let answer = '';
   let lastShown = '';
   try {
@@ -195,7 +204,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       let msg;
       try {
         hooks.onThinkingStart?.();
-        msg = await chat(cfg, messages, tools, ctrl.signal);
+        msg = await chat(roleCfg, messages, tools, ctrl.signal, hooks.onDelta);
         hooks.onThinkingEnd?.();
       } catch (err) {
         hooks.onThinkingEnd?.();
@@ -203,6 +212,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         throw err;
       }
       messages.push(msg);
+      if (msg._usage) { usage.input += msg._usage.input; usage.output += msg._usage.output; hooks.onUsage?.({ ...usage }); }
       if (msg.content && msg.content !== lastShown) {
         hooks.onText?.(msg.content);
         lastShown = msg.content;
@@ -216,7 +226,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             await memory.store(`project ${cwd}: ${objective.slice(0, 150)} -> ${answer.slice(0, 300)}`);
           } catch {}
         }
-        return { answer, changed: [...changed], ran, todos: [...todos], aborted: false };
+        return { answer, changed: [...changed], ran, todos: [...todos], usage: { ...usage }, aborted: false };
       }
       // spawn_agent pre-pass: read-only workers run in parallel (max 4), writers sequentially
       const spawnResults = new Map();
@@ -269,9 +279,31 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             result = allowedNow ? runGitTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
           }
         } else if (call.function?.name === 'fetch_url') {
-          result = await fetchUrl(input.url);
+          if (cfg.permNet === 'ask' && !hooks.approved?.has('net') && canAsk) {
+            const verdict = await hooks.onApprove('net', 'fetch_url', input);
+            if (verdict === 'always') hooks.approved?.add('net');
+            if (!verdict) result = { output: 'Denied: the user did not approve network access.' };
+          }
+          if (!result) result = await fetchUrl(input.url);
         } else if (call.function?.name === 'web_search') {
-          result = await webSearch(cfg, input.query);
+          if (cfg.permNet === 'ask' && !hooks.approved?.has('net') && canAsk) {
+            const verdict = await hooks.onApprove('net', 'web_search', input);
+            if (verdict === 'always') hooks.approved?.add('net');
+            if (!verdict) result = { output: 'Denied: the user did not approve network access.' };
+          }
+          if (!result) result = await webSearch(cfg, input.query);
+        } else if (call.function?.name?.startsWith('process_')) {
+          if (plan) result = { output: 'Refused: plan mode is read only.' };
+          else {
+            const def = PROC_TOOL_DEFS.find(t => t.name === call.function?.name);
+            let allowedNow = !def.mutating || cfg.permShell === 'allow' || hooks.approved?.has('shell');
+            if (!allowedNow && canAsk) {
+              const verdict = await hooks.onApprove('shell', call.function?.name, input);
+              if (verdict === 'always') hooks.approved?.add('shell');
+              allowedNow = Boolean(verdict);
+            }
+            result = allowedNow ? runProcTool(call.function?.name, input) : { output: `Denied: the user did not approve ${call.function?.name}.` };
+          }
         } else if (call.function?.name === 'shell') {
           if (plan) result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
           else if (isDestructive(String(input.command ?? ''))) {
@@ -333,7 +365,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
     hooks.onRunEnd?.();
   }
   const stopped = ctrl.signal.aborted;
-  return { answer, changed: [...changed], ran, todos: [...todos], aborted: true, stopped };
+  return { answer, changed: [...changed], ran, todos: [...todos], usage: { ...usage }, aborted: true, stopped };
 }
 
 export function pushTurn(history, objective, result) {
