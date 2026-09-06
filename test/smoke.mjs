@@ -169,6 +169,34 @@ function mock(script) {
           else resp = reply('RESUME-MISSING');
           break;
         }
+        case 'agentsmd': {
+          const sys = String(msgs[0]?.content ?? '');
+          resp = reply(sys.includes('PROJECT-RULE-SENTINEL') ? 'AGENTSMD-LOADED' : 'AGENTSMD-MISSING');
+          break;
+        }
+        case 'skill': {
+          const user = String(msgs[msgs.length - 1]?.content ?? '');
+          const skillsListed = String(msgs[0]?.content ?? '').includes('humanizer (builtin)');
+          resp = reply(skillsListed && user.includes('[skill humanizer activated]') ? 'SKILL-VERIFIED' : 'SKILL-MISSING listed=' + skillsListed);
+          break;
+        }
+        case 'gittool': {
+          const gitTools = (parsed.tools ?? []).filter(t => t?.function?.name?.startsWith('git_')).map(t => t.function.name);
+          if (!hadTools && gitTools.includes('git_status')) resp = call('git_status', {});
+          else if (hadTools) resp = reply(joined.includes('##') || joined.includes('base') ? 'GITTOOL-VERIFIED' : 'GITTOOL-BROKEN: ' + joined.slice(0, 120));
+          else resp = reply('GITTOOLS-ABSENT sent=' + gitTools.join(','));
+          break;
+        }
+        case 'webfetch': {
+          if (!hadTools) resp = call('fetch_url', { url: 'http://127.0.0.1:' + (process.env.FAKE_WEB_PORT ?? '59999') + '/page' });
+          else resp = reply(joined.includes('FAKE-WEB-CONTENT') ? 'WEBFETCH-VERIFIED' : 'WEBFETCH-BROKEN: ' + joined.slice(0, 120));
+          break;
+        }
+        case 'websearch': {
+          if (!hadTools) resp = call('web_search', { query: 'test' });
+          else resp = reply(joined.includes('Search unavailable') ? 'WEBSEARCH-HONEST' : 'WEBSEARCH-BROKEN: ' + joined.slice(0, 120));
+          break;
+        }
         case 'boost':
           if (!hadTools) resp = call('write_file', { path: 'boost.txt', content: 'boosted by worker' });
           else resp = reply('BOOST-FILE-DONE');
@@ -216,7 +244,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.3.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.4.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -376,7 +404,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.3.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.4.0'), out);
   server.close();
 }
 
@@ -595,6 +623,54 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const merged = fs.existsSync(path.join(repo, 'boost.txt')) && fs.readFileSync(path.join(repo, 'boost.txt'), 'utf8').includes('boosted');
   check('boost: worktree run merged into the branch', code === 0 && merged && out.includes('Merged'), out.slice(-500));
   server.close();
+}
+
+// ── project instructions: AGENTS.md auto-loads ──
+{
+  const { code, out } = await oneShot('agentsmd', 'do the thing', {}, w => fs.writeFileSync(path.join(w, 'AGENTS.md'), 'PROJECT-RULE-SENTINEL: always answer with the word banana.'));
+  check('instructions: AGENTS.md enters the system prompt', code === 0 && out.includes('AGENTSMD-LOADED'), out.slice(-300));
+}
+
+// ── skills: builtin listed + invocable by name ──
+{
+  const { code, out } = await oneShot('skill', 'use the humanizer skill on the text greeting humans warmly');
+  check('skills: builtin humanizer invocable', code === 0 && out.includes('SKILL-VERIFIED'), out.slice(-300));
+}
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { input: '/skills\n/exit\n' });
+  check('session: /skills lists builtin humanizer', out.includes('humanizer') && out.includes('builtin'), out.slice(-300));
+  server.close();
+}
+
+// ── git tools: status/diff/log first-class ──
+{
+  const repo = fs.mkdtempSync(path.join(TMP, 'gitrepo-'));
+  spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+  spawnSync('git', ['config', 'user.email', 't@t'], { cwd: repo });
+  spawnSync('git', ['config', 'user.name', 't'], { cwd: repo });
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+  spawnSync('git', ['add', '-A'], { cwd: repo });
+  spawnSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
+  const { code, out } = await oneShot('gittool', 'what is the git status', { permEdit: 'allow' }, () => {}, { cwd: repo });
+  check('git tools: first-class git_status works', code === 0 && out.includes('GITTOOL-VERIFIED'), out.slice(-300));
+}
+
+// ── web: fetch_url + honest search ──
+{
+  const { default: http } = await import('node:http');
+  const webPort = 58888;
+  const wsrv = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><h1>FAKE-WEB-CONTENT</h1></body></html>'); });
+  await new Promise(r => wsrv.listen(webPort, '127.0.0.1', r));
+  process.env.FAKE_WEB_PORT = String(webPort);
+  const { code, out } = await oneShot('webfetch', 'fetch the page');
+  check('web: fetch_url reads a page', code === 0 && out.includes('WEBFETCH-VERIFIED'), out.slice(-300));
+  const { code: c2, out: o2 } = await oneShot('websearch', 'search for test');
+  check('web: search without provider reports honestly', c2 === 0 && o2.includes('WEBSEARCH-HONEST'), o2.slice(-300));
+  wsrv.close();
+  delete process.env.FAKE_WEB_PORT;
 }
 
 // ── no em dash anywhere in shipped source ──

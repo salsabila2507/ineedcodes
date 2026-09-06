@@ -100,6 +100,9 @@ Not a chatbot that prints code. A loop that does the work, checks the results, a
 | `delete_file` | remove a file |
 | `todo` | visible checklist for multi-step work |
 | `spawn_agent` | delegate to a focused sub-agent |
+| `fetch_url` | read a web page or JSON API |
+| `web_search` | search the web (bring your own provider) |
+| `git_status` `git_diff` `git_log` `git_add` `git_commit` `git_restore` | git without the ceremony |
 | `shell` | build, test, install, git, anything |
 
 ### Multi-agent
@@ -115,6 +118,25 @@ Big tasks get delegated. The lead agent spawns workers with a role that fits:
 | `debug` | find the root cause, fix it |
 
 Workers report back with status, summary, evidence, files changed, and commands run. The lead reconciles everything and answers you.
+
+### Skills
+
+Portable `SKILL.md` folders teach ineed new behaviors. Drop one in `.ineedcodes/skills/` (this project), `~/.ineedcodes/skills/` (all projects), or use the built-in `humanizer`.
+
+```
+.ineedcodes/skills/my-skill/SKILL.md
+---
+name: my-skill
+description: What it does, shown to the agent.
+---
+Instructions for the agent go here.
+```
+
+Project skills override global ones with the same name. List them with `/skills`.
+
+### Project instructions
+
+`AGENTS.md` or `.ineedcodes/instructions.md` in your repository loads automatically, every session.
 
 ### MCP (Model Context Protocol)
 

@@ -11,6 +11,7 @@ import { getMemoryProvider, ICMAdapter } from './memory.js';
 import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
 import { mcpConfigured } from './mcp.js';
+import { listSkills, findSkill } from './skills.js';
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -214,6 +215,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/config') + '   show provider config (key hidden)');
       say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
       say('  ' + cyan('/resume') + '   bring back a saved conversation');
+      say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
       say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
       say('  ' + cyan('/clear') + '    forget this conversation');
@@ -376,6 +378,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         busy = false;
         await afterTask();
       }
+      return;
+    }
+    if (input === '/skills' || input.startsWith('/skills ')) {
+      const arg = input.slice(7).trim();
+      if (arg) {
+        const s = findSkill(arg, process.cwd());
+        if (s) { say(box([bold(`Skill ${s.name}`) + dim(` (${s.scope})`), s.description, '', dim('Instructions:'), s.instructions.slice(0, 1_500)])); say(dim('Say "use ' + s.name + ' to ..." and the agent follows them.')); }
+        else say(red(`No skill named ${arg}.`));
+        return;
+      }
+      const all = listSkills(process.cwd());
+      say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
       return;
     }
     if (input === '/resume') {

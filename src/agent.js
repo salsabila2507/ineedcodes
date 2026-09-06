@@ -1,10 +1,24 @@
 // agent.js: the loop. objective -> reason -> tool call -> observe real result -> repeat -> verify -> report.
 
 import { chat } from './provider.js';
-import { TOOLS, runTool, shellRun, isDestructive } from './tools.js';
+import { TOOLS, runTool, shellRun, isDestructive, GIT_TOOL_DEFS, runGitTool } from './tools.js';
+import { fetchUrl, webSearch } from './web.js';
 import { trunc, gray, cyan, dim } from './ui.js';
 import { getMemoryProvider } from './memory.js';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { listSkills } from './skills.js';
+
+function loadProjectInstructions(cwd) {
+  const out = [];
+  for (const rel of ['AGENTS.md', path.join('.ineedcodes', 'instructions.md')]) {
+    try {
+      const txt = fs.readFileSync(path.join(cwd, rel), 'utf8').trim();
+      if (txt) out.push(`--- ${rel} ---\n${txt.slice(0, 4_000)}`);
+    } catch {}
+  }
+  return out.join('\n\n').slice(0, 8_000);
+}
 
 export const MAX_STEPS = 30;
 export const MAX_HISTORY_CHARS = 30_000;
@@ -108,6 +122,8 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const plan = cfg.mode === 'plan';
   const depth = extra.depth ?? 0;
   let tools = plan ? TOOLS.filter(t => t.allowedInPlan) : [...TOOLS, SPAWN_TOOL];
+  // first-class git wrappers (read ones always, mutating ones gated by permEdit)
+  tools.push(...GIT_TOOL_DEFS.filter(t => plan ? !t.mutating : true));
   if (extra.toolFilter) tools = tools.filter(t => (extra.toolFilter).includes(t.name));
   const canAsk = typeof hooks.onApprove === 'function';
 
@@ -141,14 +157,22 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   }
 
   const workerPrefix = extra.worker ? `You are ${extra.worker.id} (${extra.worker.role} worker) spawned by the lead agent. ${extra.worker.prompt}\n` : '';
+  const projectInstructions = extra.worker ? '' : loadProjectInstructions(cwd);
+  const skills = extra.worker ? [] : listSkills(cwd);
+  const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
+  const invokedSkill = !extra.worker
+    ? skills.find(s => new RegExp(`\\b${s.name}\\b`, 'i').test(objective) && /humanize|skill|pakai|gunakan|use/i.test(objective))
+    : null;
   const messages = [
     {
       role: 'system',
       content: `${workerPrefix ? workerPrefix + '\n' : ''}${SYSTEM}\nWorking directory: ${cwd}\nMode: ${plan ? 'plan (read only, suggest what to change, do not change anything)' : 'build'}`
         + (recalled ? `\nRelevant memory from previous sessions with this user (durable facts, may be stale):\n${recalled}` : '')
+        + (projectInstructions ? `\nProject instructions for this repository (follow them):\n${projectInstructions}` : '')
+        + skillsBlock
     },
     ...trimHistory(history),
-    { role: 'user', content: objective }
+    { role: 'user', content: objective + (invokedSkill ? `\n\n[skill ${invokedSkill.name} activated] ${invokedSkill.instructions.slice(0, 2_000)}` : '') }
   ];
   const changed = new Set();
   const ran = [];
@@ -231,6 +255,23 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           const m = mcpMap.get(call.function?.name);
           result = await mcpManager.call(m.server, m.tool, input);
           hooks.onMCPResult?.(call.function?.name, result.output);
+        } else if (call.function?.name?.startsWith('git_')) {
+          if (plan) {
+            result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
+          } else {
+            const def = GIT_TOOL_DEFS.find(t => t.name === call.function?.name);
+            let allowedNow = !def.mutating || cfg.permEdit === 'allow' || hooks.approved?.has('edit');
+            if (!allowedNow && canAsk) {
+              const verdict = await hooks.onApprove('edit', call.function?.name, input);
+              if (verdict === 'always') hooks.approved?.add('edit');
+              allowedNow = Boolean(verdict);
+            }
+            result = allowedNow ? runGitTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
+          }
+        } else if (call.function?.name === 'fetch_url') {
+          result = await fetchUrl(input.url);
+        } else if (call.function?.name === 'web_search') {
+          result = await webSearch(cfg, input.query);
         } else if (call.function?.name === 'shell') {
           if (plan) result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
           else if (isDestructive(String(input.command ?? ''))) {
