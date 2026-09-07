@@ -36,7 +36,8 @@ export function normalize(c) {
     permNet: c.permNet === 'ask' ? 'ask' : 'allow',
     models: (c.models && typeof c.models === 'object' && !Array.isArray(c.models))
       ? Object.fromEntries(Object.entries(c.models).map(([k, v]) => [k, String(v)]))
-      : {}
+      : {},
+    lastGood: String(c.lastGood ?? '')   // last model that completed a task without error
   };
 }
 

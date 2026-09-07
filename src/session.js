@@ -191,12 +191,17 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(yellow('   Server sent no list. Change model by editing ~/.ineedcodes/config.json'));
       return;
     }
-    const list = models.slice(0, 8);
-    say(dim(`   ${models.length} models available, showing ${list.length}.`));
+    // full list: the picker scrolls, so nothing is hidden beyond a fixed slice
+    const list = models;
+    // last working model first, so a 403 "deposit required" recovery is one enter away
+    const ordered = state.lastGood && list.includes(state.lastGood)
+      ? [state.lastGood, ...list.filter(m => m !== state.lastGood)]
+      : list;
+    say(dim(`   ${list.length} models available.` + (state.lastGood && ordered[0] === state.lastGood ? ' last working is first.' : '')));
     let chosen = null;
     if (TUI) {
-      const idx = await pickFromList(list);
-      if (idx !== null) chosen = list[idx];
+      const idx = await pickFromList(ordered);
+      if (idx !== null) chosen = ordered[idx];
     }
     if (chosen === null) {
       const pick = await ask('   Model (number or full id, empty = keep current): ');
@@ -308,6 +313,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (lastStreamedForHooks && TUI) process.stdout.write('\n');
       history = pushTurn(history, input, res);
       stopSpinner();
+      // this model just finished a task cleanly: remember it as the fallback
+      if (!res.aborted && state.model !== state.lastGood) {
+        Object.assign(state, normalize({ ...state, lastGood: state.model }));
+        try { saveConfig(state); } catch {}
+      }
       try { history = await compactHistory(state, history, { onNote: n => say(dim('  ◇ ' + n)) }); } catch {}
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
@@ -335,8 +345,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         spinnerFrame = null;
         spinnerText = null;
         if (TUI) drawInputBox();
-        const a = (await ask('  [m] pick another model · [r] retry · [Enter] skip: ')).trim().toLowerCase();
+        const hint = state.lastGood && state.lastGood !== state.model ? ` [l] back to ${prettyModel(state.lastGood)}` : '';
+        const a = (await ask(`  [m] pick another model${hint} · [r] retry · [Enter] skip: `)).trim().toLowerCase();
         if (a === 'm') { await pickModel(); return runTask(input, retries + 1); }
+        if (a === 'l' && state.lastGood && state.lastGood !== state.model) {
+          Object.assign(state, normalize({ ...state, model: state.lastGood }));
+          try { saveConfig(state); } catch {}
+          say(green('  Model: ' + state.model));
+          return runTask(input, retries + 1);
+        }
         if (a === 'r') return runTask(input, retries + 1);
       }
     } finally {
