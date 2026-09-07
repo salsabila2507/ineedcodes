@@ -106,7 +106,7 @@ export const logo = () => LOGO_LINES.map(l => green(bold(l))).join('\n');
 
 // Ask a question and await one line. `secret` hides typed characters.
 // onLine: receiver for lines typed when no question is pending (REPL dispatch).
-export function makeInput(rl, onLine) {
+export function makeInput(rl, onLine, onPending = null) {
   let pending = null;
   let closed = false;
   const queue = [];
@@ -129,15 +129,17 @@ export function makeInput(rl, onLine) {
       prevEcho = rl._writeToOutput;
       rl._writeToOutput = () => {}; // hide keystrokes while the user types
     }
+    let wasPending = false;
     const deliver = v => {
       if (prevEcho) rl._writeToOutput = prevEcho;
       else if (secret) delete rl._writeToOutput;
       if (secret) process.stdout.write('\n');
+      if (wasPending) { wasPending = false; onPending?.(false); }
       res(v);
     };
     if (queue.length > 0) deliver(queue.shift());
     else if (closed) deliver('');
-    else pending = deliver;
+    else { pending = deliver; wasPending = true; onPending?.(true); }
   });
 
   // push a line as if typed: lands on a pending question, or waits in the queue

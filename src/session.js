@@ -21,6 +21,16 @@ function currentBranch(cwd) {
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
+// 'openai/glm-5.3-flash' -> 'GLM 5.3 Flash' (compact label for the composer corner)
+function prettyModel(model) {
+  const tail = String(model || '').split('/').pop();
+  return tail
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map(w => (/^[a-z]{1,3}$/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
 // Context compaction (master prompt #32): when the saved conversation grows past the
 // cap, summarize the oldest half into a factual checkpoint and drop the raw turns.
 const COMPACT_CHARS = 24_000;
@@ -65,6 +75,16 @@ function wrapLines(text, width) {
   return out;
 }
 
+// plain-text wrap for the composer (typed input carries no ANSI)
+function wrapPlain(t, width) {
+  const out = [];
+  for (const raw of String(t).split('\n')) {
+    if (raw === '') { out.push(''); continue; }
+    for (let i = 0; i < raw.length; i += width) out.push(raw.slice(i, i + width));
+  }
+  return out;
+}
+
 export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const state = normalize(cfg);
   let history = resume?.length ? [...resume] : [];
@@ -79,10 +99,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   // Full-screen TUI: great in ANSI terminals (Linux/macOS/Windows Terminal), but
   // legacy Windows consoles garble alt-screen sequences. Auto: on everywhere except
-  // win32; force with config "tui": true, disable with "tui": false.
+  // win32, unless the ANSI-capable Windows Terminal is detected (WT_SESSION or
+  // WT_PROFILE_ID) or ConEmu sets it up. Force with config "tui": true, disable
+  // with "tui": false.
   const noColor = process.env.NO_COLOR && process.env.NO_COLOR !== '0';
+  const windowsAnsi = !!(process.env.WT_SESSION || process.env.WT_PROFILE_ID || process.env.ConEmuANSI);
   const TUI = process.stdout.isTTY && !noColor
-    && (state.tui === true || (state.tui === null && process.platform !== 'win32'));
+    && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
@@ -95,7 +118,40 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // keypress handler below (they arrive as keypress with key.sequence).
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let handleRef = null;
-    const ask = makeInput(rl, l => handleRef?.(l));
+  // Pastes land as a burst of lines and readline submits each one. Coalesce the
+  // burst into a single input so a 20-line prompt runs as one task, not twenty.
+  // Trailing debounce: every arriving line resets the timer, so a slow terminal
+  // paste stays in one piece; ~100ms after the last line, it all flushes at once.
+  // (TUI only: pipes and tests keep the exact line-by-line behavior.)
+  let pasteBuf = [];
+  let pasteTimer = null;
+  const flushPaste = () => {
+    pasteTimer = null;
+    const lines = pasteBuf.splice(0);
+    if (!lines.length) return;
+    const allSlash = lines.every(x => x.startsWith('/'));
+    if (allSlash) {
+      // separate commands (possibly interleaved with prose-only lines): run each
+      for (const line of lines) { const t = line.trim(); if (t) handleRef?.(t); }
+      return;
+    }
+    const joined = lines.join('\n').replace(/^\n+|\n+$/g, '');
+    if (joined) handleRef?.(joined);
+  };
+  const dispatchLine = l => {
+    pasteBuf.push(l);
+    if (pasteTimer) clearTimeout(pasteTimer);
+    pasteTimer = setTimeout(flushPaste, 100);
+  };
+  // The composer repaints the input line itself, so readline must not echo:
+  // its output would land as ghost text at whatever row the cursor sits on.
+  // While a raw prompt is pending (approval, /model, /resume...) the prompt is
+  // printed directly, so echo stays on just for it.
+  let askPending = false;
+  // Paste coalescing works on any real terminal (Windows consoles included).
+  // Pipes and tests keep the exact line-by-line behavior.
+  const ask = makeInput(rl, process.stdout.isTTY ? dispatchLine : (l => handleRef?.(l)), p => { askPending = p; });
+  if (TUI) rl._writeToOutput = s => { if (askPending) process.stdout.write(s); };
   // EOF (Ctrl+D or closed pipe): exit cleanly, unless a task is still running
   rl.on('close', () => {
     if (!busy) doExit();
@@ -109,8 +165,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   function doExit() {
     closed = true;
+    // save whatever happened and hand back the resume code
+    let code = null;
+    if (history.length) {
+      try { code = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
+    }
     if (TUI) { screen.resetRegion(); screen.exit(); }
     console.log(dim('Goodbye.'));
+    if (code) {
+      console.log('');
+      console.log(bold(green('Session ' + code)) + dim(`  ${Math.floor(history.length / 2)} turns · ${state.model}`));
+      console.log(dim('  Resume it: start ') + bold('ineed') + dim(' and type ') + bold('/resume ' + code));
+    }
     process.exit(0);
   }
 
@@ -563,10 +629,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return;
     }
     if (input === '/new') {
-      if (sessionId) saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history });
+      let code = null;
+      if (history.length) {
+        try { code = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
+      }
       history = [];
       sessionId = null;
-      say(green('New session started.') + dim(' The old one is saved, /resume brings it back.'));
+      say(code
+        ? green('New session started.') + dim(` The old one is saved as ${code}. /resume ${code} brings it back.`)
+        : green('New session started.'));
       if (TUI) { chatLines.length = 0; redrawChat(); drawStatus(); }
       return;
     }
@@ -687,8 +758,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   let chatTop = 0, chatBot = 0;   // scroll region rows
   let statusRow = 0;
-  let inputBoxTop = 0;
-  const INPUT_ROWS = 3;           // border top + text + border bottom
+  let inputBoxTop = 0;            // top row of the composer panel
+  let composerRows = 6;           // model row + gap + text rows
+  const COMPOSER_ROWS = 6;
   let viewOffset = 0;             // lines scrolled back from the tail by the mouse wheel
   let followTail = true;
 
@@ -718,11 +790,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let menuOpen = false;
   let menuItems = [];
   let menuSelected = 0;
+  let menuDrawnRows = 0;
 
   function drawMenu() {
+    menuDrawnRows = 0;
     if (!menuOpen || !menuItems.length) return;
     const rows = process.stdout.rows || 24;
-    const anchor = inputBoxTop;             // menu floats above the input box
+    const anchor = inputBoxTop;             // menu floats just above the prompt rule
     const maxShow = Math.min(menuItems.length, Math.max(3, anchor - chatTop - 1));
     const start = Math.max(0, Math.min(menuSelected - Math.floor(maxShow / 2), menuItems.length - maxShow));
     const w = Math.min(process.stdout.columns || 80, 64);
@@ -733,6 +807,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const label = (sel ? green('› ') : '  ') + cyan(item.cmd) + ' ' + gray(trunc(item.desc, w - 24));
       buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + label;
     }
+    menuDrawnRows = maxShow;
     process.stdout.write(buf);
   }
 
@@ -741,6 +816,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     menuOpen = false;
     menuItems = [];
     menuSelected = 0;
+    menuDrawnRows = 0;
+    chatBot = inputBoxTop - 1; // give the chat its rows back, repaint the menu zone
     redrawChat();
     drawInputBox();
     scrollRegion();
@@ -753,7 +830,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       menuOpen = true;
       menuItems = matches;
       menuSelected = 0;
+      // lift the chat floor so streaming output can't repaint over the floating menu
+      chatBot = inputBoxTop - 1 - Math.min(matches.length, Math.max(3, inputBoxTop - chatTop - 1));
+      if (menuDrawnRows) redrawChat(); // wipe rows left over from a taller menu
       drawMenu();
+      scrollRegion();
     } else if (menuOpen) {
       clearMenu();
     }
@@ -769,20 +850,34 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
   }
 
+  // Composer: one borderless panel. A thin accent rail on the left, the model
+  // label top-right, and the input text blended straight onto the background.
+  // No top/right/bottom border, no inner card, no rounded corners.
   function drawInputBox() {
-    const cols = Math.min(process.stdout.columns || 80, 100);
-    const inner = cols - 4;
-    const spin = busy && spinnerFrame && !typedAhead ? cyan(spinnerFrame) + ' ' + dim(spinnerText ?? 'working') + '  ' : '';
+    const cols = process.stdout.columns || 80;
+    const rail = gray('│');
     const text = busy ? typedAhead : (rl.line ?? '');
-    const hint = busy ? spin : '';
-    const shown = trunc(text, inner - 4);
-    const pad = Math.max(0, inner - plain(shown).length - 3);
+    const spin = busy && spinnerFrame && !typedAhead ? cyan(spinnerFrame) + ' ' + dim(spinnerText ?? 'working') : '';
+    const model = dim(prettyModel(state.model));
+    const textRows = composerRows - 2;
+    const width = Math.max(10, cols - 5);          // rail + 2 padding + cursor column
+    let lines = wrapPlain(text, width);
+    if (lines.length > textRows) lines = lines.slice(lines.length - textRows);
     let buf = '';
-    buf += `\x1b[${inputBoxTop};1H\x1b[2K` + dim('╭─ ') + bold(green('❯')) + dim(' type your task · /commands · enter to run ') + dim('─'.repeat(Math.max(0, inner - 34))) + dim('╮');
-    buf += `\x1b[${inputBoxTop + 1};1H\x1b[2K` + dim('│ ') + green('❯ ') + hint + shown + ' '.repeat(pad) + dim(' │');
-    buf += `\x1b[${inputBoxTop + 2};1H\x1b[2K` + dim('╰' + '─'.repeat(inner) + '╯');
+    // model, top-right of the panel
+    buf += `\x1b[${inputBoxTop};1H\x1b[2K` + rail + ' '.repeat(Math.max(1, cols - 2 - plain(model).length)) + model;
+    // breathing room between the model line and the text
+    buf += `\x1b[${inputBoxTop + 1};1H\x1b[2K` + rail;
+    // text rows: cursor and text start top-left, continuation lines align under them
+    for (let i = 0; i < textRows; i++) {
+      buf += `\x1b[${inputBoxTop + 2 + i};1H\x1b[2K` + rail;
+      if (spin && i === 0) { buf += '  ' + spin; continue; }
+      if (i >= lines.length) continue;
+      if (i === 0 && !busy && !text) buf += '  ' + green(bold('▌')) + ' ' + dim('Type message...');
+      else if (i === 0) buf += '  ' + green(bold('▌')) + ' ' + lines[0];
+      else buf += ' '.repeat(4) + lines[i];
+    }
     process.stdout.write(buf);
-    // park the cursor out of sight while the spinner runs
   }
 
   function drawStatus() {
@@ -791,7 +886,6 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const ctxK = (history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0) / 1024).toFixed(1) + 'k';
     const tok = usage.input || usage.output ? ` ${dim(usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output + '')} tok` : '';
     const left = ` ${bold(green('ineed'))} ${dim(`v${VERSION}`)}${branch ? ' ' + cyan('(' + branch + ')') : ''}`;
-    const mid = ` ${dim(state.model)}`;
     const right =
       ` ${mode === 'plan' ? yellow('plan') : green('build')} ${dim('/')} ${dim(state.reasoning)}` +
       ` ${dim('/')} ${dim(ctxK + ' ctx')}${tok}` +
@@ -799,7 +893,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       ` ${dim('/')} ${mode === 'plan' ? dim('perm') : state.permEdit === 'ask' ? green('perm:ask') : dim('perm:auto')} `;
     screen.at(statusRow, 1);
     screen.clearLine();
-    process.stdout.write(dim('─'.repeat(Math.max(0, cols - plain(left).length - plain(mid).length - plain(right).length))) + left + mid + right);
+    process.stdout.write(dim('─'.repeat(Math.max(0, cols - plain(left).length - plain(right).length))) + left + right);
   }
 
   function scrollRegion() {
@@ -878,9 +972,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const rows = process.stdout.rows || 24;
     const headerRows = 6;
     statusRow = rows - 1;
-    inputBoxTop = statusRow - INPUT_ROWS;      // 3 rows: top border, text, bottom border
-    chatTop = headerRows + 1;
-    chatBot = inputBoxTop - 1 - (menuOpen ? Math.min(menuItems.length, 6) : 0);
+    composerRows = Math.min(COMPOSER_ROWS, Math.max(4, rows - headerRows - 3));
+    inputBoxTop = statusRow - composerRows;    // composer sits right above the status line
+    chatTop = Math.min(headerRows + 1, inputBoxTop - 1);
+    chatBot = inputBoxTop - 1 - (menuOpen ? Math.min(menuItems.length, Math.max(3, inputBoxTop - chatTop - 1)) : 0);
     screen.at(1, 1);
     process.stdout.write('\x1b[2J');
     drawHeader();
@@ -913,7 +1008,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (menuOpen && key.name === 'up') { menuSelected = Math.max(0, menuSelected - 1); drawMenu(); return; }
     if (menuOpen && key.name === 'down') { menuSelected = Math.min(menuItems.length - 1, menuSelected + 1); drawMenu(); return; }
-    if (menuOpen && key.name === 'tab' && menuItems[menuSelected]) { menuOpen = false; menuItems = []; typedAhead = menuItems[menuSelected]?.cmd ?? typedAhead; clearMenu(); return; }
+    if (menuOpen && key.name === 'tab' && menuItems[menuSelected]) {
+      // pick BEFORE clearing: clearMenu resets the list, so read the item first
+      const picked = menuItems[menuSelected].cmd;
+      menuOpen = false; menuItems = []; menuSelected = 0; menuDrawnRows = 0;
+      // lift the menu zone back, wipe leftover menu rows
+      chatBot = inputBoxTop - 1;
+      redrawChat();
+      // fill the readline buffer with the picked command and repaint
+      if (!busy) { rl.write(picked); }
+      else typedAhead = picked;
+      drawInputBox();
+      return;
+    }
     if (!busy) {
       // idle: readline owns the input; just update the box text and menu from rl.line
       if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); return; }
@@ -950,4 +1057,5 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   layout();
   printWelcome();
   scrollRegion();
+  tuiReady = true;   // history rendering and stream-reset hooks may paint from here
 }
