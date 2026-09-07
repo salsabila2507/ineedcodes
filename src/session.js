@@ -191,14 +191,21 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(yellow('   Server sent no list. Change model by editing ~/.ineedcodes/config.json'));
       return;
     }
-    const list = models.slice(0, 5);
-    say(dim(`   ${models.length} models available, showing ${list.length}. Type a number, or a full model id.`));
-    list.forEach((m, i) => say(`   ${i + 1}. ${m}`));
-    const pick = await ask('   Model: ');
-    if (!pick) return;
-    const idx = Number(pick);
-    if (Number.isInteger(idx) && idx >= 1 && idx <= list.length) Object.assign(state, normalize({ ...state, model: list[idx - 1] }));
-    else Object.assign(state, normalize({ ...state, model: pick }));
+    const list = models.slice(0, 8);
+    say(dim(`   ${models.length} models available, showing ${list.length}.`));
+    let chosen = null;
+    if (TUI) {
+      const idx = await pickFromList(list);
+      if (idx !== null) chosen = list[idx];
+    }
+    if (chosen === null) {
+      const pick = await ask('   Model (number or full id, empty = keep current): ');
+      if (!pick) return;
+      const idx = Number(pick);
+      chosen = Number.isInteger(idx) && idx >= 1 && idx <= list.length ? list[idx - 1] : pick;
+    }
+    Object.assign(state, normalize({ ...state, model: chosen }));
+    try { saveConfig(state); } catch {}
     say(green('   Model: ' + state.model));
     if (TUI) drawStatus();
   }
@@ -289,7 +296,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     };
   }
 
-  async function runTask(input) {
+  async function runTask(input, retries = 0) {
     busy = true;
     lastStreamedForHooks = '';
     streamFlushedCount = 0;
@@ -319,6 +326,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       history = pushTurn(history, input, { answer: '(task failed: ' + err.message + ')' });
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       say(red('  ✗ ' + err.message) + dim('  context kept.'));
+      // model/connection trouble: offer the fix right here instead of making the
+      // user remember /model (bounded retries so it can never loop forever)
+      const recoverable = !err?.stopped
+        && retries < 5
+        && /HTTP \d{3}|model|timed out|cannot reach|fetch failed|ECONN|ENOTFOUND|network|401|403|404|429|5\d\d/i.test(String(err?.message ?? ''));
+      if (recoverable) {
+        spinnerFrame = null;
+        spinnerText = null;
+        if (TUI) drawInputBox();
+        const a = (await ask('  [m] pick another model · [r] retry · [Enter] skip: ')).trim().toLowerCase();
+        if (a === 'm') { await pickModel(); return runTask(input, retries + 1); }
+        if (a === 'r') return runTask(input, retries + 1);
+      }
     } finally {
       busy = false;
       activeRun = null;
@@ -661,11 +681,22 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         busy = false;
         return afterTask();
       }
-      list.slice(0, 8).forEach((s, i) => {
-        const first = String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' ').slice(0, 70);
-        say(`   ${s.id}  ·  ${Math.floor((s.history?.length ?? 0) / 2)} turns  ·  ${first}`);
-      });
-      const pick = await ask('   Resume which? (code, e.g. 1425-0609, empty = newest): ');
+      let pick = '';
+      if (TUI) {
+        // arrow-key selection; typing anything falls back to the code prompt
+        const labels = list.slice(0, 8).map(s =>
+          `${s.id}  ${Math.floor((s.history?.length ?? 0) / 2)} turns  ` +
+          trunc(String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' '), 46));
+        const idx = await pickFromList(labels);
+        pick = idx !== null ? list[idx].id : '';
+        if (!pick) pick = await ask('   Resume which? (code, e.g. 1425-0609, empty = newest): ');
+      } else {
+        list.slice(0, 8).forEach((s, i) => {
+          const first = String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' ').slice(0, 70);
+          say(`   ${s.id}  ·  ${Math.floor((s.history?.length ?? 0) / 2)} turns  ·  ${first}`);
+        });
+        pick = await ask('   Resume which? (code, e.g. 1425-0609, empty = newest): ');
+      }
       const s = pick ? loadSession(pick.trim()) : list[0];
       if (s?.history?.length) {
         history = s.history;
@@ -972,6 +1003,52 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     redrawChat();
   }
 
+  // ── arrow-key list picker (TUI): a floating list above the composer, like the slash menu ──
+  // Returns the index of the picked item, or null when cancelled/answered by typing.
+  let pickerActive = false;
+  let pickerItems = [];
+  let pickerSelected = 0;
+  let pickerRows = 0;
+  let pickerResolver = null;
+
+  function drawPicker() {
+    if (!pickerActive || !pickerItems.length) return;
+    const cols = process.stdout.columns || 80;
+    const maxShow = Math.min(pickerItems.length, Math.max(3, inputBoxTop - chatTop - 1));
+    const start = Math.max(0, Math.min(pickerSelected - Math.floor(maxShow / 2), pickerItems.length - maxShow));
+    let buf = '';
+    for (let i = 0; i < maxShow; i++) {
+      const item = pickerItems[start + i];
+      const sel = start + i === pickerSelected;
+      const label = (sel ? green('› ') : '  ') + cyan(item);
+      buf += `\x1b[${inputBoxTop - maxShow + i};1H\x1b[2K` + trunc(label, cols - 1);
+    }
+    pickerRows = maxShow;
+    process.stdout.write(buf);
+  }
+
+  function closePicker(restoreChat = true) {
+    if (!pickerActive) return;
+    pickerActive = false;
+    const rowsWiped = pickerRows;
+    pickerItems = []; pickerSelected = 0; pickerRows = 0;
+    if (restoreChat) { chatBot = inputBoxTop - 1; redrawChat(); drawInputBox(); scrollRegion(); }
+    else if (rowsWiped) { /* zone repaint happens on next redraw */ }
+  }
+
+  function pickFromList(items) {
+    return new Promise(resolve => {
+      pickerActive = true;
+      pickerItems = items;
+      pickerSelected = 0;
+      pickerResolver = resolve;
+      // lift the chat floor so streaming/approval output cannot paint over the list
+      chatBot = inputBoxTop - 1 - Math.min(items.length, Math.max(3, inputBoxTop - chatTop - 1));
+      scrollRegion();
+      drawPicker();
+    });
+  }
+
   const layout = () => {
     const rows = process.stdout.rows || 24;
     const headerRows = 6;
@@ -1016,6 +1093,30 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         wheelBuf = null;
       }
       return; // swallowed: readline never sees mouse bytes
+    }
+    if (pickerActive) {
+      // the list selector owns up/down/enter/esc; everything else goes to readline
+      if (key.name === 'up') { pickerSelected = Math.max(0, pickerSelected - 1); drawPicker(); return; }
+      if (key.name === 'down') { pickerSelected = Math.min(pickerItems.length - 1, pickerSelected + 1); drawPicker(); return; }
+      if (key.name === 'return') {
+        const picked = pickerSelected;
+        const r = pickerResolver; pickerResolver = null;
+        closePicker();
+        r?.(picked);
+        return;
+      }
+      if (key.name === 'escape') {
+        const r = pickerResolver; pickerResolver = null;
+        closePicker();
+        r?.(null);
+        return;
+      }
+      // any other key: cancel the picker so the user can type an id by hand
+      const r = pickerResolver; pickerResolver = null;
+      closePicker();
+      r?.(null);
+      forward();
+      return;
     }
     if (menuOpen && key.name === 'up') { menuSelected = Math.max(0, menuSelected - 1); drawMenu(); return; }
     if (menuOpen && key.name === 'down') { menuSelected = Math.min(menuItems.length - 1, menuSelected + 1); drawMenu(); return; }
