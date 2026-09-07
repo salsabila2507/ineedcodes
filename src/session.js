@@ -98,16 +98,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const steerQueue = [];      // notes typed while a task runs, injected mid-task
 
   // Full-screen TUI: great in ANSI terminals (Linux/macOS/Windows Terminal), but
-  // legacy Windows consoles garble alt-screen sequences. Auto: on everywhere except
-  // win32, unless an ANSI-capable Windows terminal is detected: Windows Terminal
-  // (WT_SESSION / WT_PROFILE_ID), ConEmu, VS Code terminal (TERM_PROGRAM=vscode)
-  // or anything that sets TERM=xterm-*. Force with config "tui": true, disable
-  // with "tui": false.
+  // legacy Windows consoles garble alt-screen sequences. On win32 the TUI turns on
+  // when any ANSI-capable host is detected: Windows Terminal (WT_SESSION /
+  // WT_PROFILE_ID), ConEmu, mintty/Git Bash (TERM_PROGRAM=mintty), VS Code, or a
+  // modern ConPTY host. Modern PowerShell / pwsh reports PowerShell* in TERM and
+  // its conhost does translate VT sequences (VirtualTerminalLevel), so it counts
+  // too. Force with config "tui": true, disable with "tui": false.
   const noColor = process.env.NO_COLOR && process.env.NO_COLOR !== '0';
+  const term = String(process.env.TERM ?? '');
   const windowsAnsi = !!(process.env.WT_SESSION || process.env.WT_PROFILE_ID
     || process.env.ConEmuANSI === 'ON'
-    || process.env.TERM_PROGRAM === 'vscode'
-    || /^xterm/.test(process.env.TERM || ''));
+    || process.env.TERM_PROGRAM          // vscode, mintty, wezterm, ...
+    || /^xterm|powerShell|pwsh/i.test(term)
+    || process.env.ANSICON);
   const TUI = process.stdout.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   let sessionId = null;
@@ -801,8 +804,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       rl.prompt();
     });
     handleRef = handle;
-    console.log(logo());
-    console.log(BANNER() + dim(` · ${state.model} · ${process.cwd()}`));
+    // big ANSI-shadow logo wraps on narrow terminals (Windows default 120 is fine,
+    // but small windows and split panes are not): fall back to the one-line banner
+    const cols = process.stdout.columns || 80;
+    if (cols >= 47) console.log(logo());
+    else console.log(green(bold('ineed')) + dim(` v${VERSION}`));
+    // keep the info tail short so the banner never wraps into a broken layout
+    console.log(BANNER() + dim(trunc(` · ${state.model} · ${process.cwd()}`, Math.max(10, cols - 48))));
+    if (process.platform === 'win32' && !windowsAnsi && state.tui !== false) {
+      console.log(dim('  tip: for the full-screen UI open this folder in Windows Terminal, or set "tui": true in ~/.ineedcodes/config.json'));
+    }
     printWelcome();
     plainPrompt();
     return;
