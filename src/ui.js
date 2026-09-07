@@ -2,7 +2,7 @@
 
 export const VERSION = '1.7.2';
 
-const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const USE_COLOR = process.stdout.isTTY && !(process.env.NO_COLOR && process.env.NO_COLOR !== '0');
 const wrap = (code, t) => USE_COLOR ? `\x1b[${code}m${t}\x1b[0m` : String(t);
 
 export const bold = t => wrap('1', t);
@@ -81,7 +81,8 @@ export const userBubble = text => {
 // ── raw screen plumbing for the full-screen chat layout ──
 export const screen = {
   enter() { process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J'); },
-  exit() { process.stdout.write('\x1b[r\x1b[?25h\x1b[?1049l'); },
+  exit() { process.stdout.write('\x1b[r\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1049l'); },
+  mouse(on) { process.stdout.write(on ? '\x1b[?1006h\x1b[?1000h' : '\x1b[?1006l\x1b[?1000l'); },
   region(top, bot) { process.stdout.write(`\x1b[${top};${bot}r`); },
   resetRegion() { process.stdout.write('\x1b[r'); },
   at(row, col = 1) { process.stdout.write(`\x1b[${row};${col}H`); },

@@ -80,17 +80,22 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // Full-screen TUI: great in ANSI terminals (Linux/macOS/Windows Terminal), but
   // legacy Windows consoles garble alt-screen sequences. Auto: on everywhere except
   // win32; force with config "tui": true, disable with "tui": false.
-  const TUI = process.stdout.isTTY && !process.env.NO_COLOR
+  const noColor = process.env.NO_COLOR && process.env.NO_COLOR !== '0';
+  const TUI = process.stdout.isTTY && !noColor
     && (state.tui === true || (state.tui === null && process.platform !== 'win32'));
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
   var tuiReady = false;
+  let boxSpinner = null;   // TUI spinner interval
+  let spinnerText = null;
+  let spinnerFrame = null;
 
-  // ONE readline, ONE line dispatcher for the whole session
+  // ONE readline, ONE dispatcher. Mouse wheel sequences are decoded in the
+  // keypress handler below (they arrive as keypress with key.sequence).
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let handleRef = null;
-  const ask = makeInput(rl, l => handleRef?.(l));
+    const ask = makeInput(rl, l => handleRef?.(l));
   // EOF (Ctrl+D or closed pipe): exit cleanly, unless a task is still running
   rl.on('close', () => {
     if (!busy) doExit();
@@ -144,14 +149,28 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   function hooksForRun(stopSpinner) {
     let spinner = null;
-    const stop = () => { spinner?.stop(); spinner = null; };
+    const stop = () => {
+      spinner?.stop(); spinner = null;
+      if (boxSpinner) { clearInterval(boxSpinner); boxSpinner = null; }
+    };
+    // TUI spinner lives inside the input box (a ticking interval would smear the screen)
+    const boxSpin = label => {
+      if (!TUI) return startSpinner(label);
+      if (boxSpinner) clearInterval(boxSpinner);
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+      let i = 0;
+      spinnerText = label;
+      spinnerFrame = frames[0];
+      boxSpinner = setInterval(() => { spinnerFrame = frames[++i % frames.length]; drawInputBox(); }, 90);
+      return { stop: () => { spinnerText = null; spinnerFrame = null; drawInputBox(); } };
+    };
     return {
       spinnerStop: stop,
-      onMemoryStart: () => { stop(); spinner = startSpinner('recalling memory'); },
+      onMemoryStart: () => { stop(); spinner = boxSpin('recalling memory'); },
       onMemoryEnd: () => stop(),
-      onThinkingStart: () => { stop(); spinner = startSpinner('thinking'); },
+      onThinkingStart: () => { stop(); spinner = boxSpin('thinking'); },
       onThinkingEnd: () => stop(),
-      onWorkStart: label => { stop(); spinner = startSpinner(label || 'working'); },
+      onWorkStart: label => { stop(); spinner = boxSpin(label || 'working'); },
       onWorkEnd: () => stop(),
       onTool: (name, input2) => { stop(); say(cyan('  ● ' + name) + gray(' ' + trunc(JSON.stringify(input2), 90))); },
       onResult: out => { say(gray('    ' + trunc(out, 110))); },
@@ -242,7 +261,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (closed) return;
     // notes typed near the end that never reached the model become follow-up tasks
     if (steerQueue.length) pendingLines.unshift(...steerQueue.splice(0));
-    if (TUI) { drawStatus(); scrollRegion(); return; }
+    if (TUI) { drawStatus(); drawInputBox(); scrollRegion(); return; }
     plainPrompt();
     while (!busy && !closed) {
       const next = pendingLines.shift();
@@ -305,7 +324,59 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
     if (input === '/help' || input === '?') return commands['/help']();
-    if (input === '/config') return commands['/config']();
+    if (input === '/config' || input === '/config show') { busy = true; try { commands['/config'](); } finally { busy = false; } return afterTask(); }
+    if (input.startsWith('/config ')) {
+      // /config <setting> <value>: change one setting and save
+      const parts = input.slice(8).trim().split(/\s+/);
+      const [setting, value] = parts;
+      const persist = () => { Object.assign(state, normalize({ ...state, mode })); saveConfig(state); if (TUI) drawStatus(); };
+      const needs = { model: 'run /model', mode: 'run /plan or /build' };
+      if (setting === 'model' || setting === 'mode') { say(dim('  ' + (needs[setting]))); return; }
+      if (setting === 'reasoning' && ['low', 'high'].includes(value)) { Object.assign(state, normalize({ ...state, reasoning: value })); persist(); say(green('  reasoning: ' + value)); return; }
+      if (setting === 'depth' && ['short', 'normal', 'deep'].includes(value)) { Object.assign(state, normalize({ ...state, explain: value })); persist(); say(green('  depth: ' + value)); return; }
+      if (setting === 'memory' && ['on', 'off'].includes(value)) { Object.assign(state, normalize({ ...state, memory: value === 'on' })); saveConfig(state); say(green('  memory: ' + value)); return; }
+      if (setting === 'humanizer' && ['on', 'off'].includes(value)) { Object.assign(state, normalize({ ...state, humanize: value === 'on' })); saveConfig(state); say(green('  humanizer: ' + value)); return; }
+      if (['permEdit', 'permShell', 'permNet'].includes('perm' + setting.charAt(0).toUpperCase() + setting.slice(1)) === false && setting === 'net' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permNet: value })); persist(); say(green('  net perm: ' + value)); return; }
+      if (setting === 'edit' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permEdit: value })); persist(); say(green('  edit perm: ' + value)); return; }
+      if (setting === 'shell' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permShell: value })); persist(); say(green('  shell perm: ' + value)); return; }
+      if (setting === 'searchurl') { Object.assign(state, normalize({ ...state, searchUrl: parts.slice(1).join(' ') })); persist(); say(green('  searchUrl set.')); return; }
+      say(dim('  Settings: reasoning|depth|memory|humanizer|edit|shell|net|searchurl <value> · model via /model · mode via /plan /build'));
+      return;
+    }
+    if (input === '/config-menu') {
+      // interactive settings menu
+      busy = true;
+      try {
+        const opts = [
+          ['model', state.model],
+          ['mode', mode],
+          ['reasoning', state.reasoning],
+          ['depth', state.explain],
+          ['edit perm', state.permEdit],
+          ['shell perm', state.permShell],
+          ['net perm', state.permNet],
+          ['memory', state.memory === false ? 'off' : 'on'],
+          ['humanizer', state.humanize === false ? 'off' : 'on']
+        ];
+        opts.forEach((o, i) => say(`   ${i + 1}. ${o[0].padEnd(12)} ${o[1]}`));
+        const pick = await ask('   Setting number to change (empty = cancel): ');
+        const n = Number(pick);
+        if (!n || !opts[n - 1]) { say(dim('   Cancelled.')); busy = false; return afterTask(); }
+        const key = opts[n - 1][0];
+        if (key === 'model') { busy = false; await pickModel(); busy = true; }
+        else if (key === 'mode') { const v = await ask('   mode (plan/build): '); if (['plan', 'build'].includes(v)) { mode = v; Object.assign(state, normalize({ ...state, mode: v })); saveConfig(state); } }
+        else if (key === 'reasoning') { const v = await ask('   reasoning (low/high): '); if (['low', 'high'].includes(v)) { Object.assign(state, normalize({ ...state, reasoning: v })); saveConfig(state); } }
+        else if (key === 'depth') { const v = await ask('   depth (short/normal/deep): '); if (['short', 'normal', 'deep'].includes(v)) { Object.assign(state, normalize({ ...state, explain: v })); saveConfig(state); } }
+        else if (key === 'edit perm') { const v = await ask('   edit perm (allow/ask): '); if (['allow', 'ask'].includes(v)) { Object.assign(state, normalize({ ...state, permEdit: v })); saveConfig(state); } }
+        else if (key === 'shell perm') { const v = await ask('   shell perm (allow/ask): '); if (['allow', 'ask'].includes(v)) { Object.assign(state, normalize({ ...state, permShell: v })); saveConfig(state); } }
+        else if (key === 'net perm') { const v = await ask('   net perm (allow/ask): '); if (['allow', 'ask'].includes(v)) { Object.assign(state, normalize({ ...state, permNet: v })); saveConfig(state); } }
+        else if (key === 'memory') { const v = await ask('   memory (on/off): '); if (['on', 'off'].includes(v)) { Object.assign(state, normalize({ ...state, memory: v === 'on' })); saveConfig(state); } }
+        else if (key === 'humanizer') { const v = await ask('   humanizer (on/off): '); if (['on', 'off'].includes(v)) { Object.assign(state, normalize({ ...state, humanize: v === 'on' })); saveConfig(state); } }
+        say(green('   Saved.'));
+      } catch (err) { say(red('   ' + err.message)); }
+      busy = false;
+      return afterTask();
+    }
     if (input === '/clear') return commands['/clear']();
     if (input === '/model') { busy = true; try { await pickModel(); } finally { busy = false; } return afterTask(); }
     if (input === '/plan') { mode = 'plan'; Object.assign(state, normalize({ ...state, mode })); say(yellow('Plan mode: read only.')); if (TUI) drawStatus(); return; }
@@ -614,9 +685,79 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     return;
   }
 
-  // ── full TUI mode ──
   let chatTop = 0, chatBot = 0;   // scroll region rows
   let statusRow = 0;
+  let inputBoxTop = 0;
+  const INPUT_ROWS = 3;           // border top + text + border bottom
+  let viewOffset = 0;             // lines scrolled back from the tail by the mouse wheel
+  let followTail = true;
+
+  // ── slash command menu (like opencode): filters while you type / ──
+  const SLASH_COMMANDS = [
+    { cmd: '/model', desc: 'pick a model from your provider' },
+    { cmd: '/plan', desc: 'plan mode: read only' },
+    { cmd: '/build', desc: 'build mode: real changes (default)' },
+    { cmd: '/reason', desc: 'toggle reasoning low/high' },
+    { cmd: '/perm', desc: 'permissions: /perm auto | /perm safe' },
+    { cmd: '/boost', desc: 'isolated git-worktree run: /boost <objective>' },
+    { cmd: '/config', desc: 'open the settings menu' },
+    { cmd: '/memory', desc: 'memory status, /memory on|off' },
+    { cmd: '/mcp', desc: 'list MCP servers and tools' },
+    { cmd: '/skills', desc: 'list installed skills' },
+    { cmd: '/humanizer', desc: 'natural-writing pass on/off' },
+    { cmd: '/status', desc: 'session overview' },
+    { cmd: '/compact', desc: 'shrink conversation into a checkpoint' },
+    { cmd: '/depth', desc: 'answer depth: short|normal|deep' },
+    { cmd: '/resume', desc: 'resume a saved session' },
+    { cmd: '/new', desc: 'start a fresh session' },
+    { cmd: '/clear', desc: 'forget this conversation' },
+    { cmd: '/setup', desc: 'redo provider setup' },
+    { cmd: '/help', desc: 'all commands' },
+    { cmd: '/exit', desc: 'quit' }
+  ];
+  let menuOpen = false;
+  let menuItems = [];
+  let menuSelected = 0;
+
+  function drawMenu() {
+    if (!menuOpen || !menuItems.length) return;
+    const rows = process.stdout.rows || 24;
+    const anchor = inputBoxTop;             // menu floats above the input box
+    const maxShow = Math.min(menuItems.length, Math.max(3, anchor - chatTop - 1));
+    const start = Math.max(0, Math.min(menuSelected - Math.floor(maxShow / 2), menuItems.length - maxShow));
+    const w = Math.min(process.stdout.columns || 80, 64);
+    let buf = '';
+    for (let i = 0; i < maxShow; i++) {
+      const item = menuItems[start + i];
+      const sel = start + i === menuSelected;
+      const label = (sel ? green('› ') : '  ') + cyan(item.cmd) + ' ' + gray(trunc(item.desc, w - 24));
+      buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + label;
+    }
+    process.stdout.write(buf);
+  }
+
+  function clearMenu() {
+    if (!menuOpen) return;
+    menuOpen = false;
+    menuItems = [];
+    menuSelected = 0;
+    redrawChat();
+    drawInputBox();
+    scrollRegion();
+  }
+
+  function updateMenu(typed) {
+    const q = typed.toLowerCase();
+    const matches = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q) || c.desc.toLowerCase().includes(q));
+    if (typed.startsWith('/') && matches.length && matches[0].cmd !== typed) {
+      menuOpen = true;
+      menuItems = matches;
+      menuSelected = 0;
+      drawMenu();
+    } else if (menuOpen) {
+      clearMenu();
+    }
+  }
 
   function drawHeader() {
     const rows = 6;
@@ -626,6 +767,22 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       screen.clearLine();
       process.stdout.write(lines[i] ?? '');
     }
+  }
+
+  function drawInputBox() {
+    const cols = Math.min(process.stdout.columns || 80, 100);
+    const inner = cols - 4;
+    const spin = busy && spinnerFrame && !typedAhead ? cyan(spinnerFrame) + ' ' + dim(spinnerText ?? 'working') + '  ' : '';
+    const text = busy ? typedAhead : (rl.line ?? '');
+    const hint = busy ? spin : '';
+    const shown = trunc(text, inner - 4);
+    const pad = Math.max(0, inner - plain(shown).length - 3);
+    let buf = '';
+    buf += `\x1b[${inputBoxTop};1H\x1b[2K` + dim('╭─ ') + bold(green('❯')) + dim(' type your task · /commands · enter to run ') + dim('─'.repeat(Math.max(0, inner - 34))) + dim('╮');
+    buf += `\x1b[${inputBoxTop + 1};1H\x1b[2K` + dim('│ ') + green('❯ ') + hint + shown + ' '.repeat(pad) + dim(' │');
+    buf += `\x1b[${inputBoxTop + 2};1H\x1b[2K` + dim('╰' + '─'.repeat(inner) + '╯');
+    process.stdout.write(buf);
+    // park the cursor out of sight while the spinner runs
   }
 
   function drawStatus() {
@@ -653,13 +810,39 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   function redrawChat() {
     // build the whole frame in one buffer, then paint once: no flicker
     const vis = chatBot - chatTop + 1;
-    const show = chatLines.slice(-vis);
+    let show;
+    if (!followTail && viewOffset > 0) {
+      const end = chatLines.length - viewOffset;
+      show = chatLines.slice(Math.max(0, end - vis), Math.max(0, end));
+    } else {
+      show = chatLines.slice(-vis);
+    }
     let buf = '';
     for (let i = 0; i < vis; i++) {
       buf += `\x1b[${chatTop + i};1H\x1b[2K` + (show[i] ?? '');
     }
+    if (!followTail) {
+      const pos = ` ${viewOffset} lines back · mouse down to return `;
+      buf += `\x1b[${chatTop};${Math.max(1, (process.stdout.columns || 80) - plain(pos).length - 2)}H` + yellow(pos);
+    }
     process.stdout.write(buf);
     scrollRegion();
+  }
+
+  function scrollUp() {
+    if (followTail) { viewOffset = Math.min(chatLines.length, chatBot - chatTop + 1); followTail = false; }
+    else viewOffset = Math.min(chatLines.length, viewOffset + (chatBot - chatTop + 1));
+    if (viewOffset <= 0) { followTail = true; viewOffset = 0; }
+    redrawChat();
+    drawInputBox();
+  }
+
+  function scrollDown() {
+    if (followTail) return;
+    viewOffset -= (chatBot - chatTop + 1);
+    if (viewOffset <= 0) { viewOffset = 0; followTail = true; }
+    redrawChat();
+    drawInputBox();
   }
 
   function tuiPrint(text) {
@@ -695,27 +878,54 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const rows = process.stdout.rows || 24;
     const headerRows = 6;
     statusRow = rows - 1;
+    inputBoxTop = statusRow - INPUT_ROWS;      // 3 rows: top border, text, bottom border
     chatTop = headerRows + 1;
-    chatBot = statusRow - 1;
+    chatBot = inputBoxTop - 1 - (menuOpen ? Math.min(menuItems.length, 6) : 0);
     screen.at(1, 1);
     process.stdout.write('\x1b[2J');
     drawHeader();
     redrawChat();
+    drawInputBox();
     drawStatus();
     scrollRegion();
   };
 
   rl.on('resize', layout);
 
-  // typed-ahead input while busy: echo it above the status bar so the user sees what they type
+  // typed-ahead input while busy: echo it inside the input box; slash menu when typing /
   let typedAhead = '';
-  rl.on('keypress', (ch, key) => {
-    if (!busy || !key) return;
+  let wheelBuf = null;
+  // keypress events are emitted on the INPUT stream, not the readline interface
+  process.stdin.on('keypress', (ch, key) => {
+    if (!key) return;
+    // readline splits SGR mouse into pieces: ESC[< then digits/; then M/m
+    if (key.sequence === '\x1b[<') { wheelBuf = ''; return; }
+    if (wheelBuf !== null) {
+      const cstr = String(ch);
+      if (/^[0-9;]+$/.test(cstr)) { wheelBuf += cstr; return; }
+      if (cstr === 'M' && wheelBuf) {
+        const btn = Number(wheelBuf.split(';')[0]);
+        if (btn === 64) scrollUp();
+        else if (btn === 65) scrollDown();
+      }
+      wheelBuf = null;
+      return;
+    }
+    if (menuOpen && key.name === 'up') { menuSelected = Math.max(0, menuSelected - 1); drawMenu(); return; }
+    if (menuOpen && key.name === 'down') { menuSelected = Math.min(menuItems.length - 1, menuSelected + 1); drawMenu(); return; }
+    if (menuOpen && key.name === 'tab' && menuItems[menuSelected]) { menuOpen = false; menuItems = []; typedAhead = menuItems[menuSelected]?.cmd ?? typedAhead; clearMenu(); return; }
+    if (!busy) {
+      // idle: readline owns the input; just update the box text and menu from rl.line
+      if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); return; }
+      setImmediate(() => { drawInputBox(); updateMenu(rl.line ?? ''); });
+      return;
+    }
     if (key.name === 'backspace') typedAhead = typedAhead.slice(0, -1);
-    else if (key.name === 'return') typedAhead = '';
+    else if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
     else if (key.ctrl || !ch || ch < ' ') return;
     else typedAhead += ch;
-    process.stdout.write(`\x1b[${statusRow - 1};1H\x1b[2K` + dim('  you: ') + typedAhead);
+    drawInputBox();
+    updateMenu(typedAhead);
     scrollRegion();
   });
 
@@ -736,6 +946,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   handleRef = handle;
 
   screen.enter();
+  screen.mouse(true);
   layout();
   printWelcome();
   scrollRegion();
