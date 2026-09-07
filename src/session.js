@@ -813,7 +813,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let inputBoxTop = 0;            // top row of the composer panel
   let composerRows = 6;           // model row + gap + text rows
   const COMPOSER_ROWS = 6;
-  let viewOffset = 0;             // lines scrolled back from the tail by the mouse wheel
+  let viewStart = 0;              // absolute top line of the viewport while scrolled back
   let followTail = true;
 
   // ── slash command menu (like opencode): filters while you type / ──
@@ -954,39 +954,41 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   function redrawChat() {
-    // build the whole frame in one buffer, then paint once: no flicker
+    // build the whole frame in one buffer, then paint once: no flicker.
+    // viewStart is an absolute anchor: while scrolled back, new output must not
+    // slide the lines the user is reading.
     const vis = chatBot - chatTop + 1;
-    let show;
-    if (!followTail && viewOffset > 0) {
-      const end = chatLines.length - viewOffset;
-      show = chatLines.slice(Math.max(0, end - vis), Math.max(0, end));
-    } else {
-      show = chatLines.slice(-vis);
-    }
+    if (followTail || viewStart >= chatLines.length - vis) { followTail = true; viewStart = 0; }
+    const show = followTail ? chatLines.slice(-vis) : chatLines.slice(viewStart, viewStart + vis);
     let buf = '';
     for (let i = 0; i < vis; i++) {
       buf += `\x1b[${chatTop + i};1H\x1b[2K` + (show[i] ?? '');
     }
     if (!followTail) {
-      const pos = ` ${viewOffset} lines back · mouse down to return `;
+      const back = Math.max(0, chatLines.length - (viewStart + vis));
+      const pos = ` ${back} lines back · mouse down to return `;
       buf += `\x1b[${chatTop};${Math.max(1, (process.stdout.columns || 80) - plain(pos).length - 2)}H` + yellow(pos);
     }
     process.stdout.write(buf);
     scrollRegion();
   }
 
+  const SCROLL_STEP = 3; // lines per wheel tick: fine-grained, recent lines stay visible
+
   function scrollUp() {
-    if (followTail) { viewOffset = Math.min(chatLines.length, chatBot - chatTop + 1); followTail = false; }
-    else viewOffset = Math.min(chatLines.length, viewOffset + (chatBot - chatTop + 1));
-    if (viewOffset <= 0) { followTail = true; viewOffset = 0; }
+    const vis = chatBot - chatTop + 1;
+    if (chatLines.length <= vis) return; // everything already fits
+    if (followTail) { viewStart = Math.max(0, chatLines.length - vis - SCROLL_STEP); followTail = false; }
+    else viewStart = Math.max(0, viewStart - SCROLL_STEP);
     redrawChat();
     drawInputBox();
   }
 
   function scrollDown() {
+    const vis = chatBot - chatTop + 1;
     if (followTail) return;
-    viewOffset -= (chatBot - chatTop + 1);
-    if (viewOffset <= 0) { viewOffset = 0; followTail = true; }
+    viewStart = Math.min(Math.max(0, chatLines.length - vis), viewStart + SCROLL_STEP);
+    if (viewStart >= chatLines.length - vis) { followTail = true; viewStart = 0; }
     redrawChat();
     drawInputBox();
   }
