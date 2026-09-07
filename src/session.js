@@ -99,11 +99,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   // Full-screen TUI: great in ANSI terminals (Linux/macOS/Windows Terminal), but
   // legacy Windows consoles garble alt-screen sequences. Auto: on everywhere except
-  // win32, unless the ANSI-capable Windows Terminal is detected (WT_SESSION or
-  // WT_PROFILE_ID) or ConEmu sets it up. Force with config "tui": true, disable
+  // win32, unless an ANSI-capable Windows terminal is detected: Windows Terminal
+  // (WT_SESSION / WT_PROFILE_ID), ConEmu, VS Code terminal (TERM_PROGRAM=vscode)
+  // or anything that sets TERM=xterm-*. Force with config "tui": true, disable
   // with "tui": false.
   const noColor = process.env.NO_COLOR && process.env.NO_COLOR !== '0';
-  const windowsAnsi = !!(process.env.WT_SESSION || process.env.WT_PROFILE_ID || process.env.ConEmuANSI);
+  const windowsAnsi = !!(process.env.WT_SESSION || process.env.WT_PROFILE_ID
+    || process.env.ConEmuANSI === 'ON'
+    || process.env.TERM_PROGRAM === 'vscode'
+    || /^xterm/.test(process.env.TERM || ''));
   const TUI = process.stdout.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   let sessionId = null;
