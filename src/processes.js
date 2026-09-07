@@ -43,7 +43,7 @@ export const PROC_TOOL_DEFS = [
   }
 ];
 
-export function runProcTool(name, input) {
+export function runProcTool(name, input, cwd = process.cwd()) {
   const n = String(input.name ?? '');
   if (name !== 'process_status' && !okName(n)) return { output: 'Error: name must be letters, digits, _ or - (max 40).' };
 
@@ -58,7 +58,8 @@ export function runProcTool(name, input) {
     const out = fs.openSync(logPath, 'a');
     let child;
     try {
-      child = spawn(command, { cwd: os.homedir(), shell: true, stdio: ['ignore', out, out], env: { ...process.env, NO_COLOR: '1' } });
+      // run in the project the agent is working in, not the home directory
+      child = spawn(command, { cwd, shell: true, stdio: ['ignore', out, out], env: { ...process.env, NO_COLOR: '1' } });
     } catch (err) {
       fs.closeSync(out);
       return { output: `Error: ${err.message}` };

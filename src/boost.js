@@ -20,7 +20,8 @@ export function currentBranch(cwd) {
 }
 
 export function startBoost(cwd) {
-  const n = Date.now() % 1_000_000;
+  // pid + clock: two boosts in the same millisecond must not collide
+  const n = (Date.now() % 1_000_000) * 10 + (process.pid % 10);
   const dir = path.join(os.tmpdir(), 'ineed-boost-' + n);
   const branch = 'ineed-boost-' + n;
   const r = git(['worktree', 'add', '-b', branch, dir], cwd);

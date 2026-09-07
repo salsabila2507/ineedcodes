@@ -328,7 +328,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
               if (verdict === 'always') hooks.approved?.add('shell');
               allowedNow = Boolean(verdict);
             }
-            result = allowedNow ? runProcTool(call.function?.name, input) : { output: `Denied: the user did not approve ${call.function?.name}.` };
+            result = allowedNow ? runProcTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
           }
         } else if (call.function?.name === 'shell') {
           if (plan) result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
@@ -388,6 +388,9 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
     }
   } finally {
+    // MCP servers are per-objective child processes: without this every task
+    // leaks them until the CLI exits.
+    if (depth === 0) mcpManager?.killAll();
     hooks.onRunEnd?.();
   }
   const stopped = ctrl.signal.aborted;

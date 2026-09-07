@@ -98,7 +98,8 @@ if (args[0] === '--child') {
 
 // one-shot task: keep this process alive as the parent, run the worker as a child
 if (args.length > 0 && args[0] !== '--reset') {
-  const child = spawn(process.execPath, [new URL(import.meta.url).pathname, '--child', ...args], { stdio: 'inherit' });
+  const { fileURLToPath } = await import('node:url');
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', ...args], { stdio: 'inherit' });
   child.on('exit', code => process.exit(code ?? 1));
 } else {
   // interactive session or setup

@@ -31,16 +31,29 @@ export async function fetchUrl(rawUrl) {
   }
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30_000);
+    const timer = setTimeout(() => ctrl.abort(), 45_000);
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: { 'user-agent': 'ineed/1.4 (+https://ineed.codes)', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' },
       redirect: 'follow'
     });
+    // stream the body with a hard cap: res.text() would load unlimited bytes first
+    const reader = res.body?.getReader();
+    let raw = '';
+    if (reader) {
+      const dec = new TextDecoder();
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        raw += dec.decode(value, { stream: true });
+        total += value.byteLength;
+        if (total > MAX_BYTES || raw.length > MAX_BYTES) { try { reader.cancel(); } catch {} raw += '\n[truncated]'; break; }
+      }
+    }
     clearTimeout(timer);
     const type = res.headers.get('content-type') ?? '';
-    let body = await res.text();
-    if (body.length > MAX_BYTES) body = body.slice(0, MAX_BYTES) + '\n[truncated]';
+    const body = raw;
     if (type.includes('html')) {
       const text = stripHtml(body);
       return { output: `HTTP ${res.status} ${url}\n${text.slice(0, 15_000)}` };

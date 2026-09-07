@@ -26,13 +26,15 @@ export function runGitTool(name, input, cwd) {
   if (!spec) return { output: `Unknown git tool: ${name}` };
   const r = git(['rev-parse', '--is-inside-work-tree'], cwd);
   if (!r.ok || r.out !== 'true') return { output: 'Error: not a git repository.' };
+  // multi-command specs (git_diff: stat + full diff) combine their outputs
+  const parts = [];
   for (const args of spec(input)) {
     const res = git(args, cwd);
     if (!res.ok) return { output: `Error: git ${args[0]}: ${res.out.slice(0, 2_000)}` };
-    if (name === 'git_add') continue; // silent success
-    return { output: res.out.slice(0, 12_000) || '(empty)' };
+    if (name !== 'git_add') parts.push(res.out);
   }
-  return { output: 'done' };
+  if (name === 'git_add') return { output: 'done' };
+  return { output: parts.filter(Boolean).join('\n\n').slice(0, 12_000) || '(empty)' };
 }
 
 export const GIT_TOOL_DEFS = [
@@ -310,12 +312,13 @@ export function runTool(name, input, cwd) {
 }
 
 const DESTRUCTIVE = [
-  /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+\/(\s|$)/,
-  /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f/,
-  /\bmkfs\b/,
-  /\bdd\s+if=/,
-  /\bgit\s+push\s+.*--force/,
-  /\bgit\s+reset\s+--hard\s+origin/,
+  /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+[^&|;]*\/(\s|$)/i,
+  /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*[rf]/i,          // recursive+force in one flag (-rf, -fr, -Rf...)
+  /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+){2,}/i,     // recursive and force as separate flags
+  /\bmkfs\b/i,
+  /\bdd\s+if=/i,
+  /\bgit\s+push\s+.*--force/i,
+  /\bgit\s+reset\s+--hard\s+origin/i,
   /:\(\)\{\s*:\|:\s*&\s*\}\s*;:/
 ];
 
