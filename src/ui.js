@@ -1,6 +1,6 @@
 // ui.js: terminal helpers. No dependencies, respects NO_COLOR and non-TTY.
 
-export const VERSION = '1.7.5';
+export const VERSION = '1.7.6';
 
 const USE_COLOR = process.stdout.isTTY && !(process.env.NO_COLOR && process.env.NO_COLOR !== '0');
 const wrap = (code, t) => USE_COLOR ? `\x1b[${code}m${t}\x1b[0m` : String(t);

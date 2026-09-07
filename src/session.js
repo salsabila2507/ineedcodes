@@ -994,21 +994,28 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // typed-ahead input while busy: echo it inside the input box; slash menu when typing /
   let typedAhead = '';
   let wheelBuf = null;
-  // keypress events are emitted on the INPUT stream, not the readline interface
+  // keypress events are emitted on the INPUT stream, not the readline interface.
+  // readline also listens there and copies printable keys into its line buffer,
+  // so SGR mouse fragments (digits, final M/m) leak into the prompt as stray
+  // numbers while scrolling. We take over the routing: mouse bytes are decoded
+  // here and never reach readline; every other key is forwarded unchanged.
+  const readlineKeypress = process.stdin.listeners('keypress');
+  process.stdin.removeAllListeners('keypress');
   process.stdin.on('keypress', (ch, key) => {
     if (!key) return;
-    // readline splits SGR mouse into pieces: ESC[< then digits/; then M/m
+    const forward = () => { for (const fn of readlineKeypress) fn.call(process.stdin, ch, key); };
+    // SGR mouse arrives in pieces: ESC[< then digits/; then final M/m
     if (key.sequence === '\x1b[<') { wheelBuf = ''; return; }
     if (wheelBuf !== null) {
       const cstr = String(ch);
       if (/^[0-9;]+$/.test(cstr)) { wheelBuf += cstr; return; }
-      if (cstr === 'M' && wheelBuf) {
+      if (cstr === 'M' || cstr === 'm') {
         const btn = Number(wheelBuf.split(';')[0]);
         if (btn === 64) scrollUp();
         else if (btn === 65) scrollDown();
+        wheelBuf = null;
       }
-      wheelBuf = null;
-      return;
+      return; // swallowed: readline never sees mouse bytes
     }
     if (menuOpen && key.name === 'up') { menuSelected = Math.max(0, menuSelected - 1); drawMenu(); return; }
     if (menuOpen && key.name === 'down') { menuSelected = Math.min(menuItems.length - 1, menuSelected + 1); drawMenu(); return; }
@@ -1016,8 +1023,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       // pick BEFORE clearing: clearMenu resets the list, so read the item first
       const picked = menuItems[menuSelected].cmd;
       menuOpen = false; menuItems = []; menuSelected = 0; menuDrawnRows = 0;
-      // lift the menu zone back, wipe leftover menu rows
-      chatBot = inputBoxTop - 1;
+      chatBot = inputBoxTop - 1; // lift the menu zone back, wipe leftover menu rows
       redrawChat();
       // fill the readline buffer with the picked command and repaint
       if (!busy) { rl.write(picked); }
@@ -1027,17 +1033,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (!busy) {
       // idle: readline owns the input; just update the box text and menu from rl.line
-      if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); return; }
+      if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
+      forward();
       setImmediate(() => { drawInputBox(); updateMenu(rl.line ?? ''); });
       return;
     }
     if (key.name === 'backspace') typedAhead = typedAhead.slice(0, -1);
     else if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
-    else if (key.ctrl || !ch || ch < ' ') return;
+    else if (key.ctrl || !ch || ch < ' ') { forward(); return; }
     else typedAhead += ch;
     drawInputBox();
     updateMenu(typedAhead);
     scrollRegion();
+    forward();
   });
 
   // keep Ctrl+Z from suspending us in raw mode: swallow the key, tell the user
