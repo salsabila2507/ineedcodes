@@ -1,7 +1,8 @@
 ---
 name: vr-writeup-ZVE-2026-3795
 description: >-
-  Vulnerability research reference: ZVE-2026-3795gated: true
+  Vulnerability research reference: ZVE-2026-3795
+gated: true
 ---
 ## Unauthenticated Remote Denial of Service in ManageEngine EventLog Analyzer Syslog Collector via Signed-Length Underflow in StringUtil::TrimAllNull
 

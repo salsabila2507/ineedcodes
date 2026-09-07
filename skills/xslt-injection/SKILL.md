@@ -1,7 +1,8 @@
 ---
 name: xslt-injection
 description: >-
-  XSLT injection testing: processor fingerprinting, XXE and document() SSRF, EXSLT write primitives, PHP/Java/.NET extension RCE surfaces. Use when user-controlled XSLT/stylesheet input or transform endpoints are in scope.gated: true
+  XSLT injection testing: processor fingerprinting, XXE and document() SSRF, EXSLT write primitives, PHP/Java/.NET extension RCE surfaces. Use when user-controlled XSLT/stylesheet input or transform endpoints are in scope.
+gated: true
 ---
 
 # SKILL: XSLT Injection — Testing Playbook

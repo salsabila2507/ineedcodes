@@ -1,7 +1,8 @@
 ---
 name: api-recon-and-docs
 description: >-
-  API reconnaissance and documentation review playbook. Use when discovering endpoints, schemas, versions, OpenAPI specs, hidden docs, and surface area for API testing.gated: true
+  API reconnaissance and documentation review playbook. Use when discovering endpoints, schemas, versions, OpenAPI specs, hidden docs, and surface area for API testing.
+gated: true
 ---
 
 # SKILL: API Recon and Docs — Endpoints, Schemas, and Version Surface

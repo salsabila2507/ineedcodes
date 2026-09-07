@@ -3,7 +3,8 @@ name: anti-debugging-techniques
 description: >-
   Anti-debugging detection and bypass playbook. Use when reversing protected
   binaries that detect debuggers via ptrace, PEB flags, timing checks, or
-  signal/exception handlers on Linux and Windows.gated: true
+  signal/exception handlers on Linux and Windows.
+gated: true
 ---
 
 # SKILL: Anti-Debugging Techniques — Detection & Bypass Playbook

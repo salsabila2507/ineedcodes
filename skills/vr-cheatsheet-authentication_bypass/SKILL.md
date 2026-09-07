@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-authentication_bypass
 description: >-
-  Vulnerability research reference: authentication_bypassgated: true
+  Vulnerability research reference: authentication_bypass
+gated: true
 ---
 # 🔐 Authentication & Identity (JWT, OAuth, SAML) Cheatsheet
 

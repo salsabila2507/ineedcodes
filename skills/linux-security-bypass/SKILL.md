@@ -1,7 +1,8 @@
 ---
 name: linux-security-bypass
 description: >-
-  Linux security mechanism bypass playbook. Use when facing restricted bash/rbash, read-only or noexec filesystems, AppArmor, SELinux, seccomp filters, or audit logging that must be evaded during post-exploitation.gated: true
+  Linux security mechanism bypass playbook. Use when facing restricted bash/rbash, read-only or noexec filesystems, AppArmor, SELinux, seccomp filters, or audit logging that must be evaded during post-exploitation.
+gated: true
 ---
 
 # SKILL: Linux Security Bypass — Expert Attack Playbook

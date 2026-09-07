@@ -1,7 +1,8 @@
 ---
 name: bba-forensics-analyst
 description: >-
-  Delegates to this agent when the user asks about digital forensics, incident response, evidence acquisition, memory forensics, disk forensics, network forensics, timeline analysis, or chain of custodygated: true
+  Delegates to this agent when the user asks about digital forensics, incident response, evidence acquisition, memory forensics, disk forensics, network forensics, timeline analysis, or chain of custody
+gated: true
 ---
 # Digital Forensics and Incident Response Agent
 

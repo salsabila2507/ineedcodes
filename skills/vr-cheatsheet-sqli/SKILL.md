@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-sqli
 description: >-
-  Vulnerability research reference: sqligated: true
+  Vulnerability research reference: sqli
+gated: true
 ---
 # 💉 SQL Injection (SQLi) Research Cheatsheet
 

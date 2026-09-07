@@ -1,7 +1,8 @@
 ---
 name: nosql-injection
 description: >-
-  NoSQL injection playbook. Use when MongoDB-style operators, JSON query objects, flexible search filters, or backend query DSLs may allow data or logic abuse.gated: true
+  NoSQL injection playbook. Use when MongoDB-style operators, JSON query objects, flexible search filters, or backend query DSLs may allow data or logic abuse.
+gated: true
 ---
 
 # SKILL: NoSQL Injection — Expert Attack Playbook

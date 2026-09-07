@@ -3,7 +3,8 @@ name: api-sec
 description: >-
   Entry P1 category router for API security. Use when choosing between API
   recon, authorization, token abuse, and hidden-parameter workflows before any
-  deeper API topic skill.gated: true
+  deeper API topic skill.
+gated: true
 ---
 
 # API Security Router

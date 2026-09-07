@@ -1,7 +1,8 @@
 ---
 name: path-traversal-lfi
 description: >-
-  Path traversal and LFI playbook. Use when file paths, download endpoints, include operations, archive extraction, or wrapper behavior may expose filesystem control.gated: true
+  Path traversal and LFI playbook. Use when file paths, download endpoints, include operations, archive extraction, or wrapper behavior may expose filesystem control.
+gated: true
 ---
 
 # SKILL: Path Traversal / Local File Inclusion (LFI) — Expert Attack Playbook

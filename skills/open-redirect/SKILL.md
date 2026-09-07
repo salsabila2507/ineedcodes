@@ -1,7 +1,8 @@
 ---
 name: open-redirect
 description: >-
-  Open redirect playbook. Use when URL parameters, form actions, or JavaScript sinks control navigation targets and may redirect users to attacker-controlled destinations.gated: true
+  Open redirect playbook. Use when URL parameters, form actions, or JavaScript sinks control navigation targets and may redirect users to attacker-controlled destinations.
+gated: true
 ---
 
 # SKILL: Open Redirect — Expert Attack Playbook

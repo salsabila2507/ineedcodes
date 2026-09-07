@@ -1,7 +1,8 @@
 ---
 name: jndi-injection
 description: >-
-  JNDI injection playbook. Use when Java applications perform JNDI lookups with attacker-controlled names, especially via Log4j2, Spring, or any code path reaching InitialContext.lookup().gated: true
+  JNDI injection playbook. Use when Java applications perform JNDI lookups with attacker-controlled names, especially via Log4j2, Spring, or any code path reaching InitialContext.lookup().
+gated: true
 ---
 
 # SKILL: JNDI Injection — Expert Attack Playbook

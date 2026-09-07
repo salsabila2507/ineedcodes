@@ -4,7 +4,8 @@ description: >-
   Entry P0 primary router for HackSkills. Use when the task involves web
   application testing, API security assessment, recon, vulnerability triage,
   exploit path planning, or choosing the right next category skill before any
-  deep topic skill.gated: true
+  deep topic skill.
+gated: true
 ---
 
 # HACKING SKILLS / HackSkills

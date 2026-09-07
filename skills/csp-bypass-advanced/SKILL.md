@@ -3,7 +3,8 @@ name: csp-bypass-advanced
 description: >-
   Advanced Content Security Policy bypass techniques. Use when XSS or data
   exfiltration is blocked by CSP and you need to find policy weaknesses, trusted
-  endpoint abuse, nonce leakage, or exfiltration channels that CSP cannot block.gated: true
+  endpoint abuse, nonce leakage, or exfiltration channels that CSP cannot block.
+gated: true
 ---
 
 # SKILL: CSP Bypass — Advanced Techniques

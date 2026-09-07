@@ -4,7 +4,8 @@ description: >-
   HTTP request smuggling and desynchronization testing. Use when front proxies,
   CDNs, or load balancers disagree with the origin on message framing
   (Content-Length vs Transfer-Encoding), on HTTP/2→HTTP/1 translation, or when
-  exploring client-side desync via browser fetch pipelines.gated: true
+  exploring client-side desync via browser fetch pipelines.
+gated: true
 ---
 
 # SKILL: HTTP Request Smuggling — Expert Attack Playbook

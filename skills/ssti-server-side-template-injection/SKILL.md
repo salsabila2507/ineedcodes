@@ -1,7 +1,8 @@
 ---
 name: ssti-server-side-template-injection
 description: >-
-  SSTI playbook. Use when template expressions, server-side rendering, preview features, or templating engines may evaluate attacker-controlled content.gated: true
+  SSTI playbook. Use when template expressions, server-side rendering, preview features, or templating engines may evaluate attacker-controlled content.
+gated: true
 ---
 
 # SKILL: Server-Side Template Injection (SSTI) — Expert Attack Playbook

@@ -3,7 +3,8 @@ name: rsa-attack-techniques
 description: >-
   RSA attack playbook for CTF and real-world cryptanalysis. Use when given
   RSA parameters (n, e, c) and need to recover plaintext by exploiting
-  weak keys, small exponents, shared factors, or padding oracles.gated: true
+  weak keys, small exponents, shared factors, or padding oracles.
+gated: true
 ---
 
 # SKILL: RSA Attack Techniques — Expert Cryptanalysis Playbook

@@ -1,7 +1,8 @@
 ---
 name: business-logic-vulnerabilities
 description: >-
-  Business logic vulnerability playbook. Use when reasoning about workflows, race conditions, price manipulation, coupon abuse, state machines, and multi-step authorization gaps.gated: true
+  Business logic vulnerability playbook. Use when reasoning about workflows, race conditions, price manipulation, coupon abuse, state machines, and multi-step authorization gaps.
+gated: true
 ---
 
 # SKILL: Business Logic Vulnerabilities — Expert Attack Playbook

@@ -1,7 +1,8 @@
 ---
 name: smart-contract-vulnerabilities
 description: >-
-  Smart contract vulnerability playbook. Use when auditing Solidity/EVM contracts for reentrancy, integer overflow, access control, delegatecall, flash loan, signature replay, and MEV-related attack patterns.gated: true
+  Smart contract vulnerability playbook. Use when auditing Solidity/EVM contracts for reentrancy, integer overflow, access control, delegatecall, flash loan, signature replay, and MEV-related attack patterns.
+gated: true
 ---
 
 # SKILL: Smart Contract Vulnerabilities — Expert Attack Playbook

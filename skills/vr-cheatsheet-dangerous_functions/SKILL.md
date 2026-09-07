@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-dangerous_functions
 description: >-
-  Vulnerability research reference: dangerous_functionsgated: true
+  Vulnerability research reference: dangerous_functions
+gated: true
 ---
 # ☢️ Dangerous Functions & Source Code Review Cheatsheet
 

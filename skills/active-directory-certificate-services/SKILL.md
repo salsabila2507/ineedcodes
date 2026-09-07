@@ -1,7 +1,8 @@
 ---
 name: active-directory-certificate-services
 description: >-
-  AD Certificate Services attack playbook. Use when targeting misconfigured AD CS for privilege escalation via ESC1-ESC13 template abuse, NTLM relay to enrollment, CA officer abuse, and certificate-based persistence.gated: true
+  AD Certificate Services attack playbook. Use when targeting misconfigured AD CS for privilege escalation via ESC1-ESC13 template abuse, NTLM relay to enrollment, CA officer abuse, and certificate-based persistence.
+gated: true
 ---
 
 # SKILL: AD CS Attack Playbook — Expert Guide

@@ -1,7 +1,8 @@
 ---
 name: vr-writeup-api_key_leak
 description: >-
-  Vulnerability research reference: api_key_leakgated: true
+  Vulnerability research reference: api_key_leak
+gated: true
 ---
 # API Key Leak in Front-End Source Code Leads to Insurance Policy Enumeration
 

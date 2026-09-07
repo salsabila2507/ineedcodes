@@ -1,7 +1,8 @@
 ---
 name: linux-privilege-escalation
 description: >-
-  Linux privilege escalation playbook. Use when you have low-privilege shell access and need to escalate to root via SUID/SGID binaries, capabilities, cron abuse, kernel exploits, misconfigurations, or credential harvesting on Linux systems.gated: true
+  Linux privilege escalation playbook. Use when you have low-privilege shell access and need to escalate to root via SUID/SGID binaries, capabilities, cron abuse, kernel exploits, misconfigurations, or credential harvesting on Linux systems.
+gated: true
 ---
 
 # SKILL: Linux Privilege Escalation — Expert Attack Playbook

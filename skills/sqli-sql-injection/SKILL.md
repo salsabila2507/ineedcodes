@@ -1,7 +1,8 @@
 ---
 name: sqli-sql-injection
 description: >-
-  SQL injection playbook. Use when input reaches SQL queries, authentication logic, sorting, filtering, reporting, or DB-specific blind and out-of-band execution paths.gated: true
+  SQL injection playbook. Use when input reaches SQL queries, authentication logic, sorting, filtering, reporting, or DB-specific blind and out-of-band execution paths.
+gated: true
 ---
 
 # SKILL: SQL Injection — Expert Attack Playbook

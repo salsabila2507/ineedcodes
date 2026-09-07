@@ -1,7 +1,8 @@
 ---
 name: reverse-shell-techniques
 description: >-
-  Reverse shell techniques playbook. Use when establishing remote shells including language one-liners, encrypted shells (OpenSSL/socat/ncat), web shells, PTY upgrades, file transfer methods, PowerShell shells, and Windows payload generation.gated: true
+  Reverse shell techniques playbook. Use when establishing remote shells including language one-liners, encrypted shells (OpenSSL/socat/ncat), web shells, PTY upgrades, file transfer methods, PowerShell shells, and Windows payload generation.
+gated: true
 ---
 
 # SKILL: Reverse Shell Techniques — Expert Attack Playbook

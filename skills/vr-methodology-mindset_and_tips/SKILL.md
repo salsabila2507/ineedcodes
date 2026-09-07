@@ -1,7 +1,8 @@
 ---
 name: vr-methodology-mindset_and_tips
 description: >-
-  Vulnerability research reference: mindset_and_tipsgated: true
+  Vulnerability research reference: mindset_and_tips
+gated: true
 ---
 # The Attacker Mindset
 

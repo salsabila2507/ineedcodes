@@ -3,7 +3,8 @@ name: waf-bypass-techniques
 description: >-
   WAF bypass methodology and generic evasion techniques. Use when a web application
   firewall blocks injection payloads (SQLi, XSS, RCE) and you need to craft
-  bypasses using encoding, protocol-level tricks, or WAF-specific weaknesses.gated: true
+  bypasses using encoding, protocol-level tricks, or WAF-specific weaknesses.
+gated: true
 ---
 
 # SKILL: WAF Bypass Techniques — Evasion Playbook

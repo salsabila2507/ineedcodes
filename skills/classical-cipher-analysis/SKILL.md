@@ -4,7 +4,8 @@ description: >-
   Classical cipher analysis playbook. Use when encountering substitution
   ciphers, Vigenere, transposition, XOR, or encoded text in CTF challenges
   that requires frequency analysis, Kasiski examination, or known-plaintext
-  cryptanalysis.gated: true
+  cryptanalysis.
+gated: true
 ---
 
 # SKILL: Classical Cipher Analysis — Expert Cryptanalysis Playbook

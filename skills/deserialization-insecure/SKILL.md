@@ -1,7 +1,8 @@
 ---
 name: deserialization-insecure
 description: >-
-  Insecure deserialization playbook. Use when Java, PHP, or Python applications deserialize untrusted data via ObjectInputStream, unserialize, pickle, or similar mechanisms that may lead to RCE, file access, or privilege escalation.gated: true
+  Insecure deserialization playbook. Use when Java, PHP, or Python applications deserialize untrusted data via ObjectInputStream, unserialize, pickle, or similar mechanisms that may lead to RCE, file access, or privilege escalation.
+gated: true
 ---
 
 # SKILL: Insecure Deserialization — Expert Attack Playbook

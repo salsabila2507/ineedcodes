@@ -8,7 +8,8 @@ description: >-
   injection. Affects Tomcat, Spring, Jetty, Undertow, Vert.x, Jackson,
   Fastjson, Apache Commons BCEL, Apache HttpClient, Angus Mail, JDK
   HttpServer, Lettuce, Jodd, XMLWriter and re-enables many "patched" CVEs
-  through WAF bypass.gated: true
+  through WAF bypass.
+gated: true
 ---
 
 # SKILL: Ghost Bits / Cast Attack — Java char to byte Narrowing Playbook

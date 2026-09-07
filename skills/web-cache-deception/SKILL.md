@@ -1,7 +1,8 @@
 ---
 name: web-cache-deception
 description: >-
-  Web cache deception and poisoning playbook. Use when CDN, reverse proxy, or application caching may serve sensitive authenticated content to other users due to path confusion or cache key manipulation.gated: true
+  Web cache deception and poisoning playbook. Use when CDN, reverse proxy, or application caching may serve sensitive authenticated content to other users due to path confusion or cache key manipulation.
+gated: true
 ---
 
 # SKILL: Web Cache Deception — Expert Attack Playbook

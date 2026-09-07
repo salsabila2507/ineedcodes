@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-rce
 description: >-
-  Vulnerability research reference: rcegated: true
+  Vulnerability research reference: rce
+gated: true
 ---
 # 💥 Command Injection & RCE Cheatsheet
 

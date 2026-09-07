@@ -3,7 +3,8 @@ name: lattice-crypto-attacks
 description: >-
   Lattice-based cryptanalysis playbook. Use when attacking RSA via Coppersmith
   small roots, recovering DSA/ECDSA nonces from bias, solving knapsack
-  problems, or applying LLL/BKZ reduction to cryptographic constructions.gated: true
+  problems, or applying LLL/BKZ reduction to cryptographic constructions.
+gated: true
 ---
 
 # SKILL: Lattice-Based Cryptanalysis — Expert Attack Playbook

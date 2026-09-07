@@ -1,7 +1,8 @@
 ---
 name: csv-formula-injection
 description: >-
-  CSV/spreadsheet formula injection (DDE, Excel/LibreOffice, Google Sheets IMPORT*). Use when exports, imports, or user fields feed spreadsheets or reporting tools.gated: true
+  CSV/spreadsheet formula injection (DDE, Excel/LibreOffice, Google Sheets IMPORT*). Use when exports, imports, or user fields feed spreadsheets or reporting tools.
+gated: true
 ---
 
 # SKILL: CSV Formula Injection

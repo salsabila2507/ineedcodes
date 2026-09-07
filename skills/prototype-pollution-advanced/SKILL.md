@@ -1,7 +1,8 @@
 ---
 name: prototype-pollution-advanced
 description: >-
-  Advanced prototype pollution playbook — server-side RCE, client-side gadgets, filter bypasses, and detection techniques. Companion to ../prototype-pollution/ for basics. Use when you've confirmed pollution and need to escalate to code execution or find framework-specific gadgets.gated: true
+  Advanced prototype pollution playbook — server-side RCE, client-side gadgets, filter bypasses, and detection techniques. Companion to ../prototype-pollution/ for basics. Use when you've confirmed pollution and need to escalate to code execution or find framework-specific gadgets.
+gated: true
 ---
 
 # SKILL: Prototype Pollution Advanced — RCE & Gadget Exploitation

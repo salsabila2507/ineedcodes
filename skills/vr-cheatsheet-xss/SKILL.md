@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-xss
 description: >-
-  Vulnerability research reference: xssgated: true
+  Vulnerability research reference: xss
+gated: true
 ---
 # 🛡️ Advanced XSS Payload & Bypass Cheatsheet
 

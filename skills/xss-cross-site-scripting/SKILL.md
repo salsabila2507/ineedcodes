@@ -1,7 +1,8 @@
 ---
 name: xss-cross-site-scripting
 description: >-
-  XSS playbook. Use when user-controlled content reaches HTML, attributes, JavaScript, DOM sinks, uploads, or multi-context rendering paths.gated: true
+  XSS playbook. Use when user-controlled content reaches HTML, attributes, JavaScript, DOM sinks, uploads, or multi-context rendering paths.
+gated: true
 ---
 
 # SKILL: Cross-Site Scripting (XSS) — Expert Attack Playbook

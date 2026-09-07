@@ -1,7 +1,8 @@
 ---
 name: ai-ml-security
 description: >-
-  AI/ML security playbook. Use when assessing model supply chain attacks (pickle RCE, poisoned weights), adversarial examples, model poisoning, model stealing, data privacy attacks (membership inference, model inversion), and autonomous agent security risks.gated: true
+  AI/ML security playbook. Use when assessing model supply chain attacks (pickle RCE, poisoned weights), adversarial examples, model poisoning, model stealing, data privacy attacks (membership inference, model inversion), and autonomous agent security risks.
+gated: true
 ---
 
 # SKILL: AI/ML Security — Expert Attack Playbook

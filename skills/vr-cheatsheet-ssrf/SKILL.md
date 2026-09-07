@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-ssrf
 description: >-
-  Vulnerability research reference: ssrfgated: true
+  Vulnerability research reference: ssrf
+gated: true
 ---
 # SSRF (Server-Side Request Forgery) Cheatsheet
 

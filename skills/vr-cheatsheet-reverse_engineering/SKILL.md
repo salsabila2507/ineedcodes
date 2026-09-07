@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-reverse_engineering
 description: >-
-  Vulnerability research reference: reverse_engineeringgated: true
+  Vulnerability research reference: reverse_engineering
+gated: true
 ---
 # 🔄 Reverse Engineering (Ghidra & GDB) Cheatsheet
 

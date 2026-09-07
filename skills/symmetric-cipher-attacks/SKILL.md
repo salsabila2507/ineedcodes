@@ -3,7 +3,8 @@ name: symmetric-cipher-attacks
 description: >-
   Symmetric cipher attack playbook. Use when exploiting block cipher mode
   weaknesses (CBC padding oracle, ECB cut-and-paste, bit flipping), stream
-  cipher key reuse, or meet-in-the-middle attacks.gated: true
+  cipher key reuse, or meet-in-the-middle attacks.
+gated: true
 ---
 
 # SKILL: Symmetric Cipher Attacks — Expert Cryptanalysis Playbook

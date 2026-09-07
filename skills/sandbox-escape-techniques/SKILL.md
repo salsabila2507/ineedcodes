@@ -1,7 +1,8 @@
 ---
 name: sandbox-escape-techniques
 description: >-
-  Sandbox escape playbook. Use when breaking out of Python sandbox, Lua sandbox, seccomp filter, chroot jail, container/Docker, browser sandbox, or namespace isolation to achieve unrestricted code execution or file access.gated: true
+  Sandbox escape playbook. Use when breaking out of Python sandbox, Lua sandbox, seccomp filter, chroot jail, container/Docker, browser sandbox, or namespace isolation to achieve unrestricted code execution or file access.
+gated: true
 ---
 
 # SKILL: Sandbox Escape — Expert Attack Playbook

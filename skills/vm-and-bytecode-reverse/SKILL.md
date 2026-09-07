@@ -3,7 +3,8 @@ name: vm-and-bytecode-reverse
 description: >-
   Custom VM and bytecode reverse engineering playbook. Use when CTF challenges
   or protected software implement custom virtual machines with proprietary
-  bytecode, dispatcher loops, or maze-style challenges.gated: true
+  bytecode, dispatcher loops, or maze-style challenges.
+gated: true
 ---
 
 # SKILL: VM & Bytecode Reverse Engineering — Expert Analysis Playbook

@@ -1,7 +1,8 @@
 ---
 name: vr-cheatsheet-linux_commands
 description: >-
-  Vulnerability research reference: linux_commandsgated: true
+  Vulnerability research reference: linux_commands
+gated: true
 ---
 # Linux Commands Reference
 

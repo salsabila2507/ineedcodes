@@ -1,7 +1,8 @@
 ---
 name: crlf-injection
 description: >-
-  CRLF injection playbook. Use when user input reaches HTTP response headers, Location redirects, Set-Cookie values, or log files where carriage-return/line-feed characters can split or inject content.gated: true
+  CRLF injection playbook. Use when user input reaches HTTP response headers, Location redirects, Set-Cookie values, or log files where carriage-return/line-feed characters can split or inject content.
+gated: true
 ---
 
 # SKILL: CRLF Injection — Expert Attack Playbook

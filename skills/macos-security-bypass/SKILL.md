@@ -1,7 +1,8 @@
 ---
 name: macos-security-bypass
 description: >-
-  macOS security bypass playbook. Use when targeting macOS endpoints and need to bypass TCC, Gatekeeper, SIP, sandbox, code signing, or entitlement-based protections during authorized red team or pentest engagements.gated: true
+  macOS security bypass playbook. Use when targeting macOS endpoints and need to bypass TCC, Gatekeeper, SIP, sandbox, code signing, or entitlement-based protections during authorized red team or pentest engagements.
+gated: true
 ---
 
 # SKILL: macOS Security Bypass — Expert Attack Playbook

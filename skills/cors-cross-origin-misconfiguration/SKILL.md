@@ -1,7 +1,8 @@
 ---
 name: cors-cross-origin-misconfiguration
 description: >-
-  CORS misconfiguration testing playbook. Use when analyzing cross-origin trust, credentialed browser reads, origin reflection, preflight policy bugs, and browser-based access to authenticated APIs.gated: true
+  CORS misconfiguration testing playbook. Use when analyzing cross-origin trust, credentialed browser reads, origin reflection, preflight policy bugs, and browser-based access to authenticated APIs.
+gated: true
 ---
 
 # SKILL: CORS Misconfiguration — Credentialed Origins, Reflection, and Trust Boundary Errors
