@@ -31,6 +31,27 @@ const THEMES = {
     success: '1',      warning: '2',       error: '7',
     divider: '2',      focus: '1',         command: '1',
     tool: '2',         model: '2',         path: '2'
+  },
+  nord: {
+    background: '49',  panel: '48;5;235',  userBg: '48;5;237',
+    text: '97',        muted: '38;5;245',  accent: '38;5;111',
+    success: '38;5;113', warning: '38;5;179', error: '38;5;174',
+    divider: '38;5;240', focus: '38;5;111', command: '97',
+    tool: '38;5;111',  model: '38;5;129',  path: '38;5;109'
+  },
+  dracula: {
+    background: '49',  panel: '48;5;236',  userBg: '48;5;60',
+    text: '97',        muted: '38;5;245',  accent: '38;5;141',
+    success: '38;5;120', warning: '38;5;215', error: '38;5;210',
+    divider: '38;5;238', focus: '38;5;141', command: '38;5;117',
+    tool: '38;5;141',  model: '38;5;117',  path: '38;5;151'
+  },
+  synthwave: {
+    background: '49',  panel: '48;5;54',   userBg: '48;5;53',
+    text: '97',        muted: '38;5;146',  accent: '38;5;213',
+    success: '38;5;49', warning: '38;5;201', error: '38;5;203',
+    divider: '38;5;98', focus: '38;5;213', command: '38;5;51',
+    tool: '38;5;213',  model: '38;5;51',   path: '38;5;189'
   }
 };
 

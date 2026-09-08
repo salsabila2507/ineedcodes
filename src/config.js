@@ -27,7 +27,7 @@ export function normalize(c) {
     memory: c.memory !== false,
     mcp: c.mcp !== false,
     tui: c.tui === true ? true : c.tui === false ? false : null,
-    theme: c.theme === 'light' ? 'light' : c.theme === 'mono' ? 'mono' : 'dark',
+    theme: ['light', 'mono', 'nord', 'dracula', 'synthwave'].includes(c.theme) ? c.theme : 'dark',
     humanize: c.humanize !== false,
     stream: c.stream === true,
     searchUrl: c.searchUrl ? String(c.searchUrl) : '',

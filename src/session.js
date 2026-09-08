@@ -528,7 +528,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/status') + '   everything about this session at a glance');
       say('  ' + cyan('/compact') + '  shrink the conversation into a checkpoint');
       say('  ' + cyan('/depth') + '    answer depth: /depth short|normal|deep');
-      say('  ' + cyan('/theme') + '    color theme: /theme dark | light | mono');
+      say('  ' + cyan('/theme') + '    pick a color theme (arrow keys): dark, light, mono, nord, dracula, synthwave');
       say('  ' + cyan('/new') + '     start a fresh session, keep the old saved');
       say('  ' + cyan('/resume') + '   list sessions, /resume <code> like 1425-0609');
       say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
@@ -552,17 +552,35 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + T.muted('shell perm') + '  ' + T.text(state.permShell));
       say('  ' + T.muted('API key') + '     ' + T.muted('saved, hidden'));
     },
-    '/theme': arg => {
-      const v = String(arg ?? '').trim().toLowerCase();
-      if (themeNames().includes(v)) {
+    '/theme': async arg => {
+      const apply = v => {
         setTheme(v);
         Object.assign(state, normalize({ ...state, theme: v }));
         try { saveConfig(state); } catch {}
         say(green('  Theme: ' + v));
-        if (TUI) { layout(); drawStatus(); }
+        if (TUI) { layout({ clear: true }); drawStatus(); }
+      };
+      const names = themeNames();
+      const v = String(arg ?? '').trim().toLowerCase();
+      if (names.includes(v)) return apply(v);
+      const cur = getTheme();
+      if (TUI) {
+        // arrow-key picker, same as /model: live preview, Enter to keep
+        const labels = names.map(n => n + (n === cur ? '  (current)' : ''));
+        const idx = await pickFromList(labels);
+        if (idx !== null) apply(names[idx]);
+        else say(T.muted('  theme: ' + cur));
         return;
       }
-      say('  ' + T.muted('themes: ') + themeNames().join(' · ') + T.muted('   (/theme <name>)'));
+      say('  ' + T.muted('themes (current: ' + cur + '):'));
+      names.forEach((n, i) => say(`   ${i + 1}. ${n}`));
+      const pick = await ask('   Theme number or name (empty = keep): ');
+      const t = pick.trim().toLowerCase();
+      if (!t) return;
+      if (names.includes(t)) return apply(t);
+      const n = Number(t);
+      if (Number.isInteger(n) && n >= 1 && n <= names.length) return apply(names[n - 1]);
+      say(red('  No theme named ' + t + '.'));
     },
     '/clear': () => { history = []; say(dim('Conversation forgotten.')); }
   };
@@ -580,7 +598,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
     if (input === '/help' || input === '?') return commands['/help']();
-    if (input === '/theme' || input.startsWith('/theme ')) return commands['/theme'](input.slice(6).trim());
+    if (input === '/theme' || input.startsWith('/theme ')) { busy = true; try { await commands['/theme'](input.slice(6).trim()); } finally { busy = false; } return afterTask(); }
     if (input === '/config' || input === '/config show') { busy = true; try { commands['/config'](); } finally { busy = false; } return afterTask(); }
     if (input.startsWith('/config ')) {
       // /config <setting> <value>: change one setting and save
@@ -990,7 +1008,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     { cmd: '/status', desc: 'session overview' },
     { cmd: '/compact', desc: 'shrink conversation into a checkpoint' },
     { cmd: '/depth', desc: 'answer depth: short|normal|deep' },
-    { cmd: '/theme', desc: 'color theme: dark | light | mono' },
+    { cmd: '/theme', desc: 'pick a color theme: dark, light, mono, nord, dracula, synthwave' },
     { cmd: '/resume', desc: 'resume a saved session' },
     { cmd: '/new', desc: 'start a fresh session' },
     { cmd: '/clear', desc: 'forget this conversation' },
