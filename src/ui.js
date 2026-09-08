@@ -108,7 +108,7 @@ export const gray = t => wrap('90', t);
 
 export const trunc = (s, n = 120) => {
   const o = String(s).replaceAll('\n', ' ');
-  return o.length > n ? o.slice(0, n - 1) + '...' : o;
+  return o.length > n ? o.slice(0, n - 3) + '...' : o;
 };
 
 // Terminal-safe markdown: **bold** becomes ANSI bold (or disappears without color),
@@ -159,11 +159,12 @@ export const RULE = () => tDivider('─'.repeat(Math.min(process.stdout.columns 
 
 // user message: one wide horizontal band. Subtle full-width background, a small
 // `>` marker on the left, no rounded bubble, no thick border, no nested card.
-// Fills most of the terminal width; wraps without breaking the band.
+// Fills most of the terminal width. Each painted row is exactly cols-4 visible
+// columns, matching the chat wrap width, so wrapLines never splits the band.
 export function userBlock(text) {
   const cols = process.stdout.columns || 80;
-  const width = Math.max(20, cols - 4);
-  const inner = width - 4;                       // '  > ' head on the first row
+  const width = Math.max(20, cols - 4);          // same budget as tuiPrint wrapping
+  const inner = width - 5;                       // '  > ' head + trailing pad column
   const band = s => USE_COLOR ? bgOn('userBg') + s + resetOff() : s;
   const marker = USE_COLOR ? fgOn('accent') + '>' + fgOff() + ' ' : '> ';
   const lines = [];

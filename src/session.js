@@ -27,13 +27,21 @@ const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
 // ANSI-aware truncation for painted single lines (escapes do not count as width)
 const ansiTrunc = (s, n) => {
-  let vis = 0, i = 0;
+  let vis = 0, i = 0, out = '';
   while (i < s.length) {
-    if (s[i] === '\x1b') { while (i < s.length && s[i] !== 'm') i++; if (i < s.length) i++; continue; }
-    if (++vis > n) return s.slice(0, i - 1) + '...';
+    if (s[i] === '\x1b') {
+      // copy whole escape sequences verbatim so the cut never splits one
+      const m = /^\x1b\[[0-9;?]*[a-zA-Z]/.exec(s.slice(i));
+      if (m) { out += m[0]; i += m[0].length; continue; }
+      i++;
+      continue;
+    }
+    if (vis >= n) return out + '...';
+    out += s[i];
+    vis++;
     i++;
   }
-  return s;
+  return out;
 };
 
 // /home/user/ineedcodes -> ~/ineedcodes (only when actually inside the home dir)
@@ -49,8 +57,9 @@ function shortPath(p) {
 function truncMid(s, n) {
   const t = String(s ?? '');
   if (t.length <= n) return t;
-  const half = Math.floor((n - 1) / 2);
-  return t.slice(0, half) + '...' + t.slice(t.length - (n - 1 - half));
+  if (n <= 3) return t.slice(0, n);
+  const half = Math.floor((n - 3) / 2);
+  return t.slice(0, half) + '...' + t.slice(t.length - (n - 3 - half));
 }
 
 // 'openai/glm-5.3-flash' -> 'glm-5.3-flash' tail for the bottom bar
@@ -316,6 +325,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (TUI) {
       const idx = await pickFromList(ordered);
       if (idx !== null) chosen = ordered[idx];
+      else return;   // Esc on the picker cancels, no second prompt
     }
     if (chosen === null) {
       const pick = await ask('   Model (number or full id, empty = keep current): ');
@@ -435,6 +445,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     busy = true;
     lastStreamedForHooks = '';
     streamFlushedCount = 0;
+    streamBaseLines = null;   // fresh anchor per task, or task 2 would wipe task 1's output
     lastToolName = null;
     runStartedAt = Date.now();
     if (TUI) tuiUserLine(input);
@@ -443,6 +454,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     startWork('Working');
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
+      // kill a pending stream flush before painting the verdict, or it would
+      // truncate the chat back past the Done line
+      if (streamFlushTimer) { clearTimeout(streamFlushTimer); streamFlushTimer = null; }
+      if (TUI) flushStreamed();
       if (lastStreamedForHooks && TUI) process.stdout.write('\n');
       history = pushTurn(history, input, res);
       stopSpinner();
@@ -467,6 +482,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         else if (!res.changed?.length) say(T.muted('  (no output)'));
       }
     } catch (err) {
+      if (streamFlushTimer) { clearTimeout(streamFlushTimer); streamFlushTimer = null; }
       stopSpinner();
       stopWork();
       history = pushTurn(history, input, { answer: '(task failed: ' + err.message + ')' });
@@ -506,8 +522,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (closed) return;
     // notes typed near the end that never reached the model become follow-up tasks
     if (steerQueue.length) pendingLines.unshift(...steerQueue.splice(0));
-    if (TUI) { drawStatus(); drawInputBox(); scrollRegion(); return; }
-    plainPrompt();
+    if (TUI) { drawStatus(); drawInputBox(); scrollRegion(); }
+    else plainPrompt();
+    // queued commands/steer notes typed mid-task run now, in both modes
     while (!busy && !closed) {
       const next = pendingLines.shift();
       if (!next) break;
@@ -611,7 +628,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (setting === 'depth' && ['short', 'normal', 'deep'].includes(value)) { Object.assign(state, normalize({ ...state, explain: value })); persist(); say(green('  depth: ' + value)); return; }
       if (setting === 'memory' && ['on', 'off'].includes(value)) { Object.assign(state, normalize({ ...state, memory: value === 'on' })); saveConfig(state); say(green('  memory: ' + value)); return; }
       if (setting === 'humanizer' && ['on', 'off'].includes(value)) { Object.assign(state, normalize({ ...state, humanize: value === 'on' })); saveConfig(state); say(green('  humanizer: ' + value)); return; }
-      if (['permEdit', 'permShell', 'permNet'].includes('perm' + setting.charAt(0).toUpperCase() + setting.slice(1)) === false && setting === 'net' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permNet: value })); persist(); say(green('  net perm: ' + value)); return; }
+      if (setting === 'net' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permNet: value })); persist(); say(green('  net perm: ' + value)); return; }
       if (setting === 'edit' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permEdit: value })); persist(); say(green('  edit perm: ' + value)); return; }
       if (setting === 'shell' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permShell: value })); persist(); say(green('  shell perm: ' + value)); return; }
       if (setting === 'searchurl') { Object.assign(state, normalize({ ...state, searchUrl: parts.slice(1).join(' ') })); persist(); say(green('  searchUrl set.')); return; }
@@ -779,6 +796,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         return;
       }
       busy = true;
+      startWork('Boosting');   // boost owns its own working line: nothing else stops it
       try {
         if (!boost.boostAvailable(process.cwd())) { say(yellow('Boost needs a git repository (with a commit).')); return; }
         const b = boost.startBoost(process.cwd());
@@ -808,6 +826,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       } catch (err) {
         say(red('  ✗ boost failed: ' + err.message));
       } finally {
+        stopWork();
         busy = false;
         await afterTask();
       }
@@ -872,8 +891,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           `${s.id}  ${Math.floor((s.history?.length ?? 0) / 2)} turns  ` +
           trunc(String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' '), 46));
         const idx = await pickFromList(labels);
-        pick = idx !== null ? list[idx].id : '';
-        if (!pick) pick = await ask('   Resume which? (code, e.g. 1425-0609, empty = newest): ');
+        if (idx === null) { busy = false; return afterTask(); }   // Esc cancels
+        pick = list[idx].id;
       } else {
         list.slice(0, 8).forEach((s, i) => {
           const first = String(s.history?.find(m => m.role === 'user')?.content ?? '').replaceAll('\n', ' ').slice(0, 70);
@@ -1040,9 +1059,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   function drawMenu() {
     menuDrawnRows = 0;
     if (!menuOpen || !menuItems.length) return;
-    const rows = process.stdout.rows || 24;
     const anchor = composerAnchor();        // menu floats just above the composer
     const maxShow = Math.min(menuItems.length, Math.max(3, anchor - chatTop - 1));
+    if (anchor - maxShow < 1) return;       // terminal too small for a float
     const start = Math.max(0, Math.min(menuSelected - Math.floor(maxShow / 2), menuItems.length - maxShow));
     const w = Math.min(process.stdout.columns || 80, 64);
     let buf = '';
@@ -1283,6 +1302,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const cols = process.stdout.columns || 80;
     const anchor = composerAnchor();
     const maxShow = Math.min(pickerItems.length, Math.max(3, anchor - chatTop - 1));
+    if (anchor - maxShow < 1) return;       // terminal too small for a float
     const start = Math.max(0, Math.min(pickerSelected - Math.floor(maxShow / 2), pickerItems.length - maxShow));
     let buf = '';
     for (let i = 0; i < maxShow; i++) {
@@ -1324,10 +1344,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const rows = process.stdout.rows || 24;
     statusRow = rows;
     composerRows = composerRowsFor(busy ? typedAhead : (rl.line ?? ''), Math.max(10, (process.stdout.columns || 80) - 7), (process.stdout.columns || 80));
-    workRow = statusRow - composerRows;        // live working line above the composer
-    composerTop = workRow + 1;                 // composer: workRow+1 .. statusRow-1
+    // composer spans composerRows rows and must end one above the status bar
+    composerTop = Math.max(chatTop + 2, statusRow - composerRows);
+    workRow = composerTop - 1;                 // live working line above the composer
     chatTop = 1;                               // full-height conversation, no header
-    chatBot = Math.max(chatTop, composerAnchor() - 1);
+    chatBot = chatFloor();
     if (opts.clear) { screen.at(1, 1); process.stdout.write('\x1b[2J'); }
     redrawChat();
     if (menuOpen) drawMenu();
@@ -1363,8 +1384,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         if (btn === 64) scrollUp();
         else if (btn === 65) scrollDown();
         wheelBuf = null;
+        return;
       }
-      return; // swallowed: readline never sees mouse bytes
+      // not a mouse continuation: recover instead of swallowing every keypress
+      wheelBuf = null;
+      // fall through to normal key handling
     }
     // keyboard scrollback: PageUp/PageDown, shift+arrows.
     // Old conversation stays readable while a task streams below.
