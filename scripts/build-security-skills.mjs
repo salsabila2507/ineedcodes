@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // build-security-skills.mjs: converts the three security skill sources into ineed
 // SKILL.md format under the DEVELOPER skills directory. Never shipped in npm.
-// Sources must be cloned to /tmp/opencode/skills-src first.
+// Sources must be cloned to /tmp/ineed-skills-src first.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-const SRC = '/tmp/opencode/skills-src';
+const SRC = '/tmp/ineed-skills-src';
 const OUT = path.join(process.env.HOME, '.ineedcodes', 'skills'); // global developer dir
 const TIERS = new Set(); // name -> scope marker
 

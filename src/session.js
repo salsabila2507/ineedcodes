@@ -1,11 +1,15 @@
-// session.js: interactive chat TUI. Fixed logo header, scrolling chat area, fixed status + input footer.
+// session.js: interactive chat TUI. Flat terminal-native layout: scrolling
+// conversation, inline tool/agent activity, live working line, borderless
+// composer, and a compact bottom bar (model / reasoning / working directory).
 // Falls back to a plain REPL (same commands) when stdout is not a TTY, so tests and pipes keep working.
 
 import * as readline from 'node:readline';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { clearConfig, normalize, saveConfig } from './config.js';
 import { runObjective, pushTurn } from './agent.js';
 import { fetchModels } from './provider.js';
-import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, box, startSpinner, VERSION, RULE, userBubble, screen } from './ui.js';
+import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen } from './ui.js';
 import { wizard } from './wizard.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
 import { saveSession, listSessions, loadSession } from './sessions.js';
@@ -20,6 +24,109 @@ function currentBranch(cwd) {
 }
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+
+// ANSI-aware truncation for painted single lines (escapes do not count as width)
+const ansiTrunc = (s, n) => {
+  let vis = 0, i = 0;
+  while (i < s.length) {
+    if (s[i] === '\x1b') { while (i < s.length && s[i] !== 'm') i++; if (i < s.length) i++; continue; }
+    if (++vis > n) return s.slice(0, i - 1) + '...';
+    i++;
+  }
+  return s;
+};
+
+// /home/user/ineedcodes -> ~/ineedcodes (only when actually inside the home dir)
+function shortPath(p) {
+  const home = os.homedir();
+  const s = String(p ?? '');
+  if (s === home) return '~';
+  if (s.startsWith(home + path.sep)) return '~' + s.slice(home.length);
+  return s;
+}
+
+// truncate in the middle: long paths and model names must not destroy the layout
+function truncMid(s, n) {
+  const t = String(s ?? '');
+  if (t.length <= n) return t;
+  const half = Math.floor((n - 1) / 2);
+  return t.slice(0, half) + '...' + t.slice(t.length - (n - 1 - half));
+}
+
+// 'openai/glm-5.3-flash' -> 'glm-5.3-flash' tail for the bottom bar
+function modelTail(model) {
+  const s = String(model ?? '');
+  return s.includes('/') ? s.slice(s.lastIndexOf('/') + 1) : s;
+}
+
+// Human phrase for a tool call. Returns [verb, argument, isCommand].
+function toolLabel(name, input = {}) {
+  const p = v => String(v ?? '');
+  switch (name) {
+    case 'read_file': return ['Reading', p(input.path)];
+    case 'read_file_range': return ['Reading', p(input.path)];
+    case 'list_files': return ['Listing', p(input.path) || '.'];
+    case 'list_tracked_files': return ['Listing', 'tracked files'];
+    case 'search_text': return ['Searching', `"${trunc(p(input.pattern), 40)}"`];
+    case 'search_files': return ['Finding files', `"${trunc(p(input.pattern), 40)}"`];
+    case 'write_file': return ['Writing', p(input.path)];
+    case 'edit_file': return ['Editing', p(input.path)];
+    case 'delete_file': return ['Deleting', p(input.path)];
+    case 'copy_file': return ['Copying', `${p(input.path)} -> ${p(input.to)}`];
+    case 'move_file': return ['Moving', `${p(input.path)} -> ${p(input.to)}`];
+    case 'file_exists': return ['Checking', p(input.path)];
+    case 'file_metadata': return ['Inspecting', p(input.path)];
+    case 'shell': return ['Running', trunc(p(input.command), 70), true];
+    case 'fetch_url': return ['Fetching', trunc(p(input.url), 60)];
+    case 'web_search': return ['Searching web', `"${trunc(p(input.query), 40)}"`];
+    case 'todo': return ['Updating', 'checklist'];
+    case 'git_status': return ['Checking', 'git status'];
+    case 'git_diff': return ['Checking', 'git diff'];
+    case 'git_log': return ['Checking', 'git log'];
+    case 'git_branch': return ['Listing', 'branches'];
+    case 'git_add': return ['Staging', p(input.paths) || '.'];
+    case 'git_commit': return ['Committing', trunc(p(input.message), 50)];
+    case 'git_restore': return ['Restoring', p(input.path) || '.'];
+    case 'process_start': return ['Starting', `${p(input.name)}: ${trunc(p(input.command), 50)}`, true];
+    case 'process_output': return ['Reading log', p(input.name)];
+    case 'process_stop': return ['Stopping', p(input.name)];
+    case 'process_status': return ['Checking', 'background processes'];
+    default: return [name, trunc(p(input.command ?? input.path ?? input.url ?? input.query ?? input.objective ?? ''), 50)];
+  }
+}
+
+// inline tool activity: `• Reading src/auth.ts`
+function fmtToolLine(name, input) {
+  const [verb, arg, isCmd] = toolLabel(name, input);
+  const head = '  ' + T.tool(`• ${verb}${arg ? ' ' : ''}`);
+  if (!arg) return head;
+  return head + (isCmd ? T.command(arg) : T.path(arg));
+}
+
+// real result right below the call that produced it: `✓ exit 0` plus indented
+// stdout/stderr for commands, or a one-line summary for every other tool.
+function fmtResultLine(toolName, out) {
+  const s = String(out ?? '').replace(/\s+$/, '');
+  const cols = process.stdout.columns || 80;
+  const w = Math.max(20, cols - 8);
+  const bad = /^(Error|Refused|Denied)/i.test(s.trim());
+  const mark = bad ? T.error('✗') : T.success('✓');
+  if (toolName === 'shell' || toolName === 'process_output') {
+    const rows = s.split('\n');
+    const head = rows.shift() ?? '';
+    const code = /^exit code:\s*(.+)$/.exec(head);
+    const headLine = code
+      ? mark + T.muted(` exit ${code[1]}`)
+      : mark + (head ? ' ' + T.muted(trunc(head, w)) : '');
+    const rest = rows.map(l => l.trim()).filter(Boolean);
+    const shown = rest.slice(0, 8).map(l => '    ' + T.muted(trunc(l, w)));
+    if (rest.length > 8) shown.push(T.muted('    ... +' + (rest.length - 8) + ' more lines'));
+    return ['  ' + headLine, ...shown].join('\n');
+  }
+  const first = s.split('\n')[0] ?? '';
+  if (!first) return '  ' + mark;
+  return '  ' + mark + ' ' + T.muted(trunc(first, Math.max(20, cols - 6)));
+}
 
 // 'openai/glm-5.3-flash' -> 'GLM 5.3 Flash' (compact label for the composer corner)
 function prettyModel(model) {
@@ -87,6 +194,7 @@ function wrapPlain(t, width) {
 
 export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const state = normalize(cfg);
+  setTheme(state.theme);   // theme tokens color the whole TUI from the first paint
   let history = resume?.length ? [...resume] : [];
   let busy = false;
   let activeRun = null;
@@ -117,9 +225,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
   var tuiReady = false;
-  let boxSpinner = null;   // TUI spinner interval
-  let spinnerText = null;
-  let spinnerFrame = null;
+  let spinnerFrame = null;   // current frame of the live working-line spinner
+  let spinnerText = null;    // label shown on the live working line
+  let workTick = null;       // working-line interval
+  let working = false;       // live "Working" status line visible?
+  let runStartedAt = 0;
+  let lastToolName = null;   // most recent tool call, so its result renders below it
 
   // ONE readline, ONE dispatcher. Mouse wheel sequences are decoded in the
   // keypress handler below (they arrive as keypress with key.sequence).
@@ -234,31 +345,39 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   function hooksForRun(stopSpinner) {
     let spinner = null;
+    // phase-level stop: drops the plain-REPL spinner; the TUI working line is
+    // owned by the task and keeps ticking across phases (spinnerStop ends it)
     const stop = () => {
       spinner?.stop(); spinner = null;
-      if (boxSpinner) { clearInterval(boxSpinner); boxSpinner = null; }
     };
-    // TUI spinner lives inside the input box (a ticking interval would smear the screen)
+    // Compact live status line: "• Working (12s · esc to interrupt)". The tick
+    // only repaints that one row, so nothing else on screen can smear.
     const boxSpin = label => {
       if (!TUI) return startSpinner(label);
-      if (boxSpinner) clearInterval(boxSpinner);
-      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-      let i = 0;
-      spinnerText = label;
-      spinnerFrame = frames[0];
-      boxSpinner = setInterval(() => { spinnerFrame = frames[++i % frames.length]; drawInputBox(); }, 90);
-      return { stop: () => { spinnerText = null; spinnerFrame = null; drawInputBox(); } };
+      startWork(label);
+      return { stop: () => {} };
     };
     return {
-      spinnerStop: stop,
-      onMemoryStart: () => { stop(); spinner = boxSpin('recalling memory'); },
+      // task-level stop: also ends the live working line (runTask finally)
+      spinnerStop: () => { stop(); stopWork(); },
+      onMemoryStart: () => { stop(); spinner = boxSpin('Recalling memory'); },
       onMemoryEnd: () => stop(),
-      onThinkingStart: () => { stop(); spinner = boxSpin('thinking'); },
+      onThinkingStart: () => { stop(); spinner = boxSpin('Working'); },
       onThinkingEnd: () => stop(),
-      onWorkStart: label => { stop(); spinner = boxSpin(label || 'working'); },
+      onWorkStart: label => { stop(); spinner = boxSpin(label || 'Working'); },
       onWorkEnd: () => stop(),
-      onTool: (name, input2) => { stop(); say(cyan('  ● ' + name) + gray(' ' + trunc(JSON.stringify(input2), 90))); },
-      onResult: out => { say(gray('    ' + trunc(out, 110))); },
+      onTool: (name, input2) => {
+        stop();
+        runStartedAt = runStartedAt || Date.now();
+        lastToolName = name;
+        say(fmtToolLine(name, input2));
+      },
+      onResult: out => {
+        // renders right below the tool event that produced it; spawn_agent and
+        // todo results are already reported by onAgentEnd / onTodos
+        if (lastToolName === 'spawn_agent' || lastToolName === 'todo') return;
+        say(fmtResultLine(lastToolName ?? '', out));
+      },
       onText: t => { stop(); },
       onDelta: chunk => {
         // stream into the chat buffer; the full text lands on flushStreamed()
@@ -269,20 +388,28 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       },
       onTodos: list => {
         stop();
-        const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
-        say(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
+        const mark = s => s === 'completed' ? T.success('✓') : s === 'in_progress' ? T.tool('▸') : T.muted('○');
+        say(T.muted('  ── checklist ──'));
+        for (const t of list.slice(0, 12)) say('  ' + mark(t.status) + ' ' + T.text(trunc(t.content, (process.stdout.columns || 80) - 10)));
       },
-      onAgentStart: (id, input) => { stop(); say(cyan('  ◆ spawn ' + id) + gray(` role=${input.role ?? '?'} task=${trunc(String(input.objective ?? ''), 70)}`)); },
-      onAgentEnd: (id, r) => { stop(); say((r.status === 'completed' ? green('  ◆ ' + id + ' done') : yellow('  ◆ ' + id + ' ' + r.status)) + gray(' ' + trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90))); },
-      onMCP: names => { if (names.length) say(dim('  MCP tools available: ' + names.join(', '))); },
-      onMCPResult: (name, out) => { say(gray('    mcp result: ' + trunc(out, 100))); },
-        onNote: note => { stop(); if (note.includes('applying your steer')) { lastStreamedForHooks = ''; streamFlushedCount = 0; streamBaseLines = null; if (typeof tuiReady !== 'undefined' && tuiReady) { chatLines.length = 0; redrawChat(); } } say(dim('  ◇ ' + note)); },
+      onAgentStart: (id, input) => {
+        stop();
+        say('  ' + T.tool('•') + ' ' + T.text(id) + T.muted(' ' + (input.role ?? '') + ' · ') + T.muted(trunc(String(input.objective ?? ''), 70)));
+      },
+      onAgentEnd: (id, r) => {
+        stop();
+        const bad = r.status !== 'completed';
+        say('  ' + (bad ? T.warning('✗') : T.success('✓')) + ' ' + T.text(id) + T.muted(` ${bad ? r.status : 'completed'} · `) + T.muted(trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90)));
+      },
+      onMCP: names => { if (names.length) say(T.muted('  MCP tools available: ' + names.join(', '))); },
+      onMCPResult: (name, out) => { say(fmtResultLine(name, out)); },
+        onNote: note => { stop(); if (note.includes('applying your steer')) { lastStreamedForHooks = ''; streamFlushedCount = 0; streamBaseLines = null; if (typeof tuiReady !== 'undefined' && tuiReady) { chatLines.length = 0; redrawChat(); } } say(T.muted('  ◇ ' + note)); },
         onUsage: u => { usage = u; if (TUI) drawStatus(); },
         drainSteer: () => steerQueue.splice(0),
-      onSteer: list => { for (const s of list) say(yellow('  ↳ steer: ') + s); },
+      onSteer: list => { for (const s of list) say(T.warning('  ↳ steer: ') + T.text(s)); },
       onApprove: async (cat, name, input2) => {
         stop();
-        say(yellow('  ⚠ approval needed') + ' ' + cyan(name) + gray(' ' + trunc(JSON.stringify(input2), 80)));
+        say(T.warning('  ⚠ approval needed') + ' ' + T.command(name) + T.muted(' ' + trunc(JSON.stringify(input2), 80)));
         const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
         const c = a.trim().toLowerCase();
         if (c === 's' || c === 'save') {
@@ -290,12 +417,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           if (cat === 'edit') Object.assign(state, normalize({ ...state, permEdit: 'allow' }));
           if (cat === 'shell') Object.assign(state, normalize({ ...state, permShell: 'allow' }));
           saveConfig(state);
-          say(dim('     always allowed, saved to config. /perm safe to undo.'));
+          say(T.muted('     always allowed, saved to config. /perm safe to undo.'));
           return 'always';
         }
-        if (c === 'a' || c === 'always') { approved.add(cat); say(dim('     always allowed for this session.')); return 'always'; }
+        if (c === 'a' || c === 'always') { approved.add(cat); say(T.muted('     always allowed for this session.')); return 'always'; }
         if (c === 'y' || c === 'yes') return true;
-        say(dim('     denied.'));
+        say(T.muted('     denied.'));
         return false;
       },
       approved,
@@ -308,45 +435,50 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     busy = true;
     lastStreamedForHooks = '';
     streamFlushedCount = 0;
+    lastToolName = null;
+    runStartedAt = Date.now();
     if (TUI) tuiUserLine(input);
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
+    startWork('Working');
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
       if (lastStreamedForHooks && TUI) process.stdout.write('\n');
       history = pushTurn(history, input, res);
       stopSpinner();
+      // task over: the working line disappears (or changes to the verdict line)
+      stopWork();
+      if (TUI) drawInputBox();
       // this model just finished a task cleanly: remember it as the fallback
       if (!res.aborted && state.model !== state.lastGood) {
         Object.assign(state, normalize({ ...state, lastGood: state.model }));
         try { saveConfig(state); } catch {}
       }
-      try { history = await compactHistory(state, history, { onNote: n => say(dim('  ◇ ' + n)) }); } catch {}
+      try { history = await compactHistory(state, history, { onNote: n => say(T.muted('  ◇ ' + n)) }); } catch {}
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
-        say(yellow('  ■ Stopped') + dim(' - partly done. Ask me to continue.'));
+        say(T.warning('  ■ Stopped') + T.muted(' - partly done. Ask me to continue.'));
       } else {
-        const rows = [green(bold('■ Done'))];
-        if (res.changed?.length) rows.push(dim('  files: ') + res.changed.join(', '));
+        // flat summary: no card, just the result line plus the answer text
+        say('  ' + T.success('✓ Done') + (res.changed?.length ? T.muted('  files: ' + res.changed.join(', ')) : ''));
         const answerIsStreamed = lastStreamedForHooks && res.answer === lastStreamedForHooks;
-        if (res.answer && !answerIsStreamed) String(res.answer).split('\n').slice(0, 14).forEach(l => rows.push('  ' + l));
-        else if (answerIsStreamed) rows.push(dim('  (streamed above)'));
-        else if (!res.changed?.length) rows.push(dim('  (no output)'));
-        say(box(rows));
+        if (res.answer && !answerIsStreamed) String(res.answer).split('\n').slice(0, 14).forEach(l => say('  ' + l));
+        else if (answerIsStreamed) say(T.muted('  (streamed above)'));
+        else if (!res.changed?.length) say(T.muted('  (no output)'));
       }
     } catch (err) {
       stopSpinner();
+      stopWork();
       history = pushTurn(history, input, { answer: '(task failed: ' + err.message + ')' });
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
-      say(red('  ✗ ' + err.message) + dim('  context kept.'));
+      say(T.error('  ✗ ' + err.message) + T.muted('  context kept.'));
       // model/connection trouble: offer the fix right here instead of making the
       // user remember /model (bounded retries so it can never loop forever)
       const recoverable = !err?.stopped
         && retries < 5
         && /HTTP \d{3}|model|timed out|cannot reach|fetch failed|ECONN|ENOTFOUND|network|401|403|404|429|5\d\d/i.test(String(err?.message ?? ''));
       if (recoverable) {
-        spinnerFrame = null;
-        spinnerText = null;
+        stopWork();
         if (TUI) drawInputBox();
         const hint = state.lastGood && state.lastGood !== state.model ? ` [l] back to ${prettyModel(state.lastGood)}` : '';
         const a = (await ask(`  [m] pick another model${hint} · [r] retry · [Enter] skip: `)).trim().toLowerCase();
@@ -362,6 +494,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     } finally {
       busy = false;
       activeRun = null;
+      working = false;
+      runStartedAt = 0;
+      lastToolName = null;
       stopSpinner();
       await afterTask();
     }
@@ -393,6 +528,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/status') + '   everything about this session at a glance');
       say('  ' + cyan('/compact') + '  shrink the conversation into a checkpoint');
       say('  ' + cyan('/depth') + '    answer depth: /depth short|normal|deep');
+      say('  ' + cyan('/theme') + '    color theme: /theme dark | light | mono');
       say('  ' + cyan('/new') + '     start a fresh session, keep the old saved');
       say('  ' + cyan('/resume') + '   list sessions, /resume <code> like 1425-0609');
       say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
@@ -406,17 +542,27 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/exit') + '     quit');
     },
     '/config': () => {
-      say(box([
-        bold('Provider config') + dim('  ~/.ineedcodes/config.json'),
-        dim('base URL') + '   ' + state.baseUrl,
-        dim('model') + '      ' + state.model,
-        dim('reasoning') + '  ' + state.reasoning,
-        dim('mode') + '        ' + mode,
-        dim('memory') + '      ' + (state.memory === false ? 'off' : 'on (icm)'),
-        dim('edit perm') + '   ' + state.permEdit,
-        dim('shell perm') + '  ' + state.permShell,
-        dim('API key') + '     saved, hidden'
-      ]));
+      say(T.muted('  ── provider config ──'));
+      say('  ' + T.muted('base URL') + '   ' + T.text(state.baseUrl));
+      say('  ' + T.muted('model') + '      ' + T.text(state.model));
+      say('  ' + T.muted('reasoning') + '  ' + T.text(state.reasoning));
+      say('  ' + T.muted('mode') + '        ' + T.text(mode));
+      say('  ' + T.muted('memory') + '      ' + T.text(state.memory === false ? 'off' : 'on (icm)'));
+      say('  ' + T.muted('edit perm') + '   ' + T.text(state.permEdit));
+      say('  ' + T.muted('shell perm') + '  ' + T.text(state.permShell));
+      say('  ' + T.muted('API key') + '     ' + T.muted('saved, hidden'));
+    },
+    '/theme': arg => {
+      const v = String(arg ?? '').trim().toLowerCase();
+      if (themeNames().includes(v)) {
+        setTheme(v);
+        Object.assign(state, normalize({ ...state, theme: v }));
+        try { saveConfig(state); } catch {}
+        say(green('  Theme: ' + v));
+        if (TUI) { layout(); drawStatus(); }
+        return;
+      }
+      say('  ' + T.muted('themes: ') + themeNames().join(' · ') + T.muted('   (/theme <name>)'));
     },
     '/clear': () => { history = []; say(dim('Conversation forgotten.')); }
   };
@@ -434,6 +580,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
     if (input === '/help' || input === '?') return commands['/help']();
+    if (input === '/theme' || input.startsWith('/theme ')) return commands['/theme'](input.slice(6).trim());
     if (input === '/config' || input === '/config show') { busy = true; try { commands['/config'](); } finally { busy = false; } return afterTask(); }
     if (input.startsWith('/config ')) {
       // /config <setting> <value>: change one setting and save
@@ -514,16 +661,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (parts[0] === 'shell' && ['allow', 'ask'].includes(parts[1])) {
         return apply(state.permEdit, parts[1], `Shell permission: ${parts[1]}.`);
       }
-      say(box([
-        bold('Permissions'),
-        dim('edit') + '   ' + state.permEdit + dim('  (write_file, edit_file, delete_file)'),
-        dim('shell') + '   ' + state.permShell,
-        dim('granted this session') + '  ' + ([...approved].join(', ') || 'none'),
-        '',
-        dim('/perm auto') + '   never ask (saved)',
-        dim('/perm safe') + '   ask for edits and shell (saved)',
-        dim('/perm edit allow|ask   /perm shell allow|ask')
-      ]));
+      say(T.muted('  ── permissions ──'));
+      say('  ' + T.muted('edit') + '   ' + T.text(state.permEdit) + T.muted('  (write_file, edit_file, delete_file)'));
+      say('  ' + T.muted('shell') + '   ' + T.text(state.permShell));
+      say('  ' + T.muted('granted this session') + '  ' + T.text([...approved].join(', ') || 'none'));
+      say('');
+      say('  ' + T.muted('/perm auto') + '   never ask (saved)');
+      say('  ' + T.muted('/perm safe') + '   ask for edits and shell (saved)');
+      say('  ' + T.muted('/perm edit allow|ask   /perm shell allow|ask'));
       return;
     }
     if (input === '/memory' || input.startsWith('/memory ')) {
@@ -546,18 +691,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return afterTask();
     }
     if (input === '/status') {
-      say(box([
-        bold('Status'),
-        dim('model') + '      ' + state.model,
-        dim('mode') + '       ' + mode + dim(' / reasoning ' + state.reasoning + ' / depth ' + state.explain),
-        dim('perms') + '       edit:' + state.permEdit + ' shell:' + state.permShell + ' net:' + state.permNet,
-        dim('memory') + '      ' + (state.memory === false ? 'off' : 'on (icm)'),
-        dim('humanizer') + '   ' + (state.humanize === false ? 'off' : 'on'),
-        dim('mcp') + '        ' + (mcpConfigured() ? 'configured' : 'not configured'),
-        dim('tokens') + '      ' + (usage.input || usage.output ? usage.input + ' in / ' + usage.output + ' out' : '-'),
-        dim('session') + '     ' + (sessionId ?? 'not saved yet'),
-        dim('cwd') + '        ' + process.cwd()
-      ]));
+      say(T.muted('  ── Status ──'));
+      say('  ' + T.muted('model') + '      ' + T.text(state.model));
+      say('  ' + T.muted('mode') + '       ' + T.text(mode) + T.muted(' / reasoning ' + state.reasoning + ' / depth ' + state.explain));
+      say('  ' + T.muted('perms') + '       ' + T.text('edit:' + state.permEdit + ' shell:' + state.permShell + ' net:' + state.permNet));
+      say('  ' + T.muted('memory') + '      ' + T.text(state.memory === false ? 'off' : 'on (icm)'));
+      say('  ' + T.muted('humanizer') + '   ' + T.text(state.humanize === false ? 'off' : 'on'));
+      say('  ' + T.muted('mcp') + '        ' + T.text(mcpConfigured() ? 'configured' : 'not configured'));
+      say('  ' + T.muted('tokens') + '      ' + T.text(usage.input || usage.output ? usage.input + ' in / ' + usage.output + ' out' : '-'));
+      say('  ' + T.muted('session') + '     ' + T.text(sessionId ?? 'not saved yet'));
+      say('  ' + T.muted('cwd') + '        ' + T.path(shortPath(process.cwd())));
       return;
     }
     if (input === '/compact') {
@@ -577,12 +720,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         saveConfig(state);
         say(green('Explanation depth: ' + arg));
       } else {
-        say(box([
-          bold('Explanation depth'),
-          dim('/depth short') + '   results only',
-          dim('/depth normal') + ' what changed and why (default)',
-          dim('/depth deep') + '   reasoning, trade-offs, ruled-out paths'
-        ]));
+        say(T.muted('  ── explanation depth ──'));
+        say('  ' + T.muted('/depth short') + '   results only');
+        say('  ' + T.muted('/depth normal') + ' what changed and why (default)');
+        say('  ' + T.muted('/depth deep') + '   reasoning, trade-offs, ruled-out paths');
       }
       return;
     }
@@ -596,12 +737,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           : yellow('Humanizer: off') + dim(' - files are written exactly as the model produces them.'));
         return;
       }
-      say(box([
-        bold('Humanizer') + dim('  ' + (state.humanize === false ? 'off' : 'on')),
-        dim('scope') + '      .html .htm .md .txt (web pages, posts, docs)',
-        dim('never touches') + '  code, tags, attributes, URLs, JSON, technical values',
-        dim('toggle') + '      /humanizer on | /humanizer off'
-      ]));
+      say(T.muted('  ── humanizer ──'));
+      say('  ' + T.muted('status') + '      ' + T.text(state.humanize === false ? 'off' : 'on'));
+      say('  ' + T.muted('scope') + '      ' + T.text('.html .htm .md .txt (web pages, posts, docs)'));
+      say('  ' + T.muted('never touches') + '  ' + T.text('code, tags, attributes, URLs, JSON, technical values'));
+      say('  ' + T.muted('toggle') + '      ' + T.text('/humanizer on | /humanizer off'));
       return;
     }
     if (input === '/boost cancel') {
@@ -615,11 +755,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (input === '/boost' || input.startsWith('/boost ')) {
       const objective = input.slice(6).trim();
       if (!objective) {
-        say(box([
-          bold('Boost') + dim('  isolated execution in a git worktree'),
-          dim('/boost <objective>') + '  run the task away from your tree, review, then merge',
-          dim('/boost cancel') + '        remove the last boost worktree'
-        ]));
+        say(T.muted('  ── boost: isolated execution in a git worktree ──'));
+        say('  ' + T.muted('/boost <objective>') + '  run the task away from your tree, review, then merge');
+        say('  ' + T.muted('/boost cancel') + '        remove the last boost worktree');
         return;
       }
       busy = true;
@@ -634,7 +772,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         boost.commitBoost(b.dir, 'boost: ' + objective.slice(0, 80));
         const d = boost.boostDiff(b.dir);
         if (d.files.length) {
-          say(box([bold('Boost changes'), ...d.files.map(f => '  ' + f)]));
+          say(T.muted('  ── boost changes ──'));
+          for (const f of d.files) say('  ' + T.path(f));
           const a = await ask(`   [y] merge into ${boost.currentBranch(process.cwd())} · [n] keep worktree: `);
           if (/^y/i.test(a.trim())) {
             const m = boost.mergeBoost(process.cwd(), b.branch);
@@ -660,7 +799,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const arg = input.slice(7).trim();
       if (arg) {
         const s = findSkill(arg, process.cwd(), input);
-        if (s) { say(box([bold(`Skill ${s.name}`) + dim(` (${s.scope}${s.gated ? ', gated' : ''})`), s.description, '', dim('Instructions:'), s.instructions.slice(0, 1_500)])); say(dim('Say "use ' + s.name + ' to ..." and the agent follows them.')); }
+        if (s) {
+          say(T.muted(`  ── skill ${s.name} ──`) + T.muted(` (${s.scope}${s.gated ? ', gated' : ''})`));
+          say('  ' + T.text(s.description));
+          say('');
+          say(T.muted('  instructions:'));
+          for (const l of s.instructions.slice(0, 1_500).split('\n').slice(0, 40)) say('  ' + T.text(l));
+          say(T.muted('Say "use ' + s.name + ' to ..." and the agent follows them.'));
+        }
         else say(red(`No skill named ${arg}.`));
         return;
       }
@@ -759,8 +905,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         const c = await wizard(ask, { fromCommand: true });
         Object.assign(state, normalize(c));
         mode = state.mode;
+        setTheme(state.theme);
         say(green('Ready. ' + state.model));
-        if (TUI) { drawHeader(); drawStatus(); }
+        if (TUI) layout();
       } catch { return doExit(); }
       busy = false;
       return afterTask();
@@ -819,15 +966,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     return;
   }
 
-  let chatTop = 0, chatBot = 0;   // scroll region rows
-  let statusRow = 0;
-  let inputBoxTop = 0;            // top row of the composer panel
-  let composerRows = 6;           // model row + gap + text rows
-  const COMPOSER_ROWS = 6;
+  let chatTop = 1, chatBot = 0;   // scroll region rows (conversation viewport)
+  let statusRow = 0;              // bottom bar: model / reasoning / working dir
+  let composerTop = 0;            // top row of the composer panel
+  let composerRows = 5;           // top pad + text rows + bottom pad
+  let workRow = 0;                // live working-status row (just above composer)
   let viewStart = 0;              // absolute top line of the viewport while scrolled back
   let followTail = true;
 
-  // ── slash command menu (like opencode): filters while you type / ──
+  // ── slash command menu: filters while you type / ──
   const SLASH_COMMANDS = [
     { cmd: '/model', desc: 'pick a model from your provider' },
     { cmd: '/plan', desc: 'plan mode: read only' },
@@ -835,7 +982,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     { cmd: '/reason', desc: 'toggle reasoning low/high' },
     { cmd: '/perm', desc: 'permissions: /perm auto | /perm safe' },
     { cmd: '/boost', desc: 'isolated git-worktree run: /boost <objective>' },
-    { cmd: '/config', desc: 'open the settings menu' },
+    { cmd: '/config', desc: 'show and change settings' },
     { cmd: '/memory', desc: 'memory status, /memory on|off' },
     { cmd: '/mcp', desc: 'list MCP servers and tools' },
     { cmd: '/skills', desc: 'list installed skills' },
@@ -843,6 +990,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     { cmd: '/status', desc: 'session overview' },
     { cmd: '/compact', desc: 'shrink conversation into a checkpoint' },
     { cmd: '/depth', desc: 'answer depth: short|normal|deep' },
+    { cmd: '/theme', desc: 'color theme: dark | light | mono' },
     { cmd: '/resume', desc: 'resume a saved session' },
     { cmd: '/new', desc: 'start a fresh session' },
     { cmd: '/clear', desc: 'forget this conversation' },
@@ -855,11 +1003,27 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let menuSelected = 0;
   let menuDrawnRows = 0;
 
+  // first row a floating list/menu may occupy: while the working line is up it
+  // must stay visible, so floats anchor above it
+  const composerAnchor = () => (working ? composerTop - 1 : composerTop);
+
+  // lowest row the conversation may paint: keeps the working line and any open
+  // floating menu clear of streaming output
+  const chatFloor = () => {
+    const base = composerAnchor() - 1;
+    const lift = menuOpen
+      ? Math.min(menuItems.length, Math.max(3, composerAnchor() - chatTop - 1))
+      : pickerActive
+        ? Math.min(pickerItems.length, Math.max(3, composerAnchor() - chatTop - 1))
+        : 0;
+    return Math.max(chatTop, base - lift);
+  };
+
   function drawMenu() {
     menuDrawnRows = 0;
     if (!menuOpen || !menuItems.length) return;
     const rows = process.stdout.rows || 24;
-    const anchor = inputBoxTop;             // menu floats just above the prompt rule
+    const anchor = composerAnchor();        // menu floats just above the composer
     const maxShow = Math.min(menuItems.length, Math.max(3, anchor - chatTop - 1));
     const start = Math.max(0, Math.min(menuSelected - Math.floor(maxShow / 2), menuItems.length - maxShow));
     const w = Math.min(process.stdout.columns || 80, 64);
@@ -867,7 +1031,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     for (let i = 0; i < maxShow; i++) {
       const item = menuItems[start + i];
       const sel = start + i === menuSelected;
-      const label = (sel ? green('› ') : '  ') + cyan(item.cmd) + ' ' + gray(trunc(item.desc, w - 24));
+      const label = (sel ? T.accent('› ') : '  ') + T.accent(item.cmd) + ' ' + T.muted(trunc(item.desc, w - 24));
       buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + label;
     }
     menuDrawnRows = maxShow;
@@ -880,7 +1044,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     menuItems = [];
     menuSelected = 0;
     menuDrawnRows = 0;
-    chatBot = inputBoxTop - 1; // give the chat its rows back, repaint the menu zone
+    chatBot = chatFloor(); // give the chat its rows back, repaint the menu zone
     redrawChat();
     drawInputBox();
     scrollRegion();
@@ -894,8 +1058,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       menuItems = matches;
       menuSelected = 0;
       // lift the chat floor so streaming output can't repaint over the floating menu
-      chatBot = inputBoxTop - 1 - Math.min(matches.length, Math.max(3, inputBoxTop - chatTop - 1));
       if (menuDrawnRows) redrawChat(); // wipe rows left over from a taller menu
+      chatBot = chatFloor();
       drawMenu();
       scrollRegion();
     } else if (menuOpen) {
@@ -903,60 +1067,112 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
   }
 
-  function drawHeader() {
-    const rows = 6;
-    const lines = logo().split('\n');
-    for (let i = 0; i < rows; i++) {
-      screen.at(i + 1, 1);
-      screen.clearLine();
-      process.stdout.write(lines[i] ?? '');
+  // live status while a task runs: `• Working (27s · esc to interrupt)`.
+  // One compact line between the conversation and the composer; no spinner panel.
+  function drawWorking() {
+    if (!working || !workRow) return;
+    const cols = process.stdout.columns || 80;
+    const secs = Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
+    const bullet = spinnerFrame ?? '•';
+    const line = ' ' + T.tool(bullet) + ' ' + T.text(spinnerText ?? 'Working')
+      + ' ' + T.muted(`(${secs}s · `) + T.muted('esc to interrupt') + T.muted(')');
+    screen.at(workRow, 1);
+    screen.clearLine();
+    process.stdout.write(ansiTrunc(line, cols - 1));
+  }
+
+  function startWork(label) {
+    if (!TUI) return;
+    if (!runStartedAt) runStartedAt = Date.now();   // elapsed belongs to the task
+    const wasWorking = working;
+    working = true;
+    spinnerText = label || 'Working';
+    if (workTick) clearInterval(workTick);
+    const frames = ['·', '•'];
+    let i = 0;
+    spinnerFrame = frames[0];
+    drawWorking();
+    workTick = setInterval(() => {
+      spinnerFrame = frames[++i % frames.length];
+      drawWorking();
+    }, 500);
+    // first line-up only: pull the chat floor up so the working row can never
+    // overwrite the newest conversation line (bug: history got painted over)
+    if (!wasWorking) layout({ clear: false });
+  }
+
+  function stopWork() {
+    if (workTick) { clearInterval(workTick); workTick = null; }
+    spinnerFrame = null;
+    spinnerText = null;
+    if (working) {
+      working = false;
+      if (workRow) { screen.at(workRow, 1); screen.clearLine(); }
+      // hand the row back to the conversation and repaint it from chatLines
+      layout({ clear: false });
     }
   }
 
-  // Composer: one borderless panel. A thin accent rail on the left, the model
-  // label top-right, and the input text blended straight onto the background.
-  // No top/right/bottom border, no inner card, no rounded corners.
+  // Composer: one wide flat panel. A thin accent rail on the left, a small `>`
+  // prompt marker, input blended straight onto a subtle panel background.
+  // No top/right/bottom border, no nested input box, no rounded corners, no pill.
   function drawInputBox() {
+    if (!composerTop) return;
     const cols = process.stdout.columns || 80;
-    const rail = gray('│');
     const text = busy ? typedAhead : (rl.line ?? '');
-    const spin = busy && spinnerFrame && !typedAhead ? cyan(spinnerFrame) + ' ' + dim(spinnerText ?? 'working') : '';
-    const model = dim(prettyModel(state.model));
+    const width = Math.max(10, cols - 7);          // rail + 2 pad + '> ' + cursor margin
+    const want = composerRowsFor(text, width, cols);
+    if (want !== composerRows) { composerRows = want; layout({ clear: false }); return; }
     const textRows = composerRows - 2;
-    const width = Math.max(10, cols - 5);          // rail + 2 padding + cursor column
-    let lines = wrapPlain(text, width);
-    if (lines.length > textRows) lines = lines.slice(lines.length - textRows);
+    const lines = wrapPlain(text, width).slice(-textRows);
     let buf = '';
-    // model, top-right of the panel
-    buf += `\x1b[${inputBoxTop};1H\x1b[2K` + rail + ' '.repeat(Math.max(1, cols - 2 - plain(model).length)) + model;
-    // breathing room between the model line and the text
-    buf += `\x1b[${inputBoxTop + 1};1H\x1b[2K` + rail;
-    // text rows: cursor and text start top-left, continuation lines align under them
+    const row = (r, content) => {
+      // one flat surface: panel background spans the full row, content on top
+      const vis = plain(content).length;
+      buf += `\x1b[${r};1H\x1b[2K` + bgOn('panel') + content + ' '.repeat(Math.max(0, cols - 1 - vis)) + resetOff();
+    };
+    const rail = working ? fgOn('divider') + '│' + fgOff() : fgOn('focus') + '│' + fgOff();
+    row(composerTop, rail);                                        // top pad
     for (let i = 0; i < textRows; i++) {
-      buf += `\x1b[${inputBoxTop + 2 + i};1H\x1b[2K` + rail;
-      if (spin && i === 0) { buf += '  ' + spin; continue; }
-      if (i >= lines.length) continue;
-      if (i === 0 && !busy && !text) buf += '  ' + green(bold('▌')) + ' ' + dim('Type message...');
-      else if (i === 0) buf += '  ' + green(bold('▌')) + ' ' + lines[0];
-      else buf += ' '.repeat(4) + lines[i];
+      const r = composerTop + 1 + i;
+      const line = lines[i];
+      if (line === undefined) { row(r, rail); continue; }
+      const marker = i === 0 ? fgOn('accent') + '>' + fgOff() + ' ' : '  ';
+      const body = (i === 0 && !text) ? fgOn('muted') + 'Ask iNeedCodes to do anything' + fgOff() : line;
+      row(r, rail + '  ' + marker + body);
     }
+    row(composerTop + 1 + textRows, rail);                         // bottom pad
     process.stdout.write(buf);
   }
 
+  function composerRowsFor(text, width, cols) {
+    const rows = process.stdout.rows || 24;
+    const maxRows = Math.max(3, rows - 3);          // keep chat + status bar visible
+    const need = Math.max(3, Math.min(12, wrapPlain(text, width).length));
+    return Math.min(need + 2, maxRows);
+  }
+
+  // Bottom status: active model, reasoning level, working directory. Real values
+  // only; the path is the live cwd with a `~` shorthand inside the home dir.
   function drawStatus() {
+    if (!TUI || !statusRow) return;
     const cols = process.stdout.columns || 80;
-    const branch = currentBranch(process.cwd());
-    const ctxK = (history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0) / 1024).toFixed(1) + 'k';
-    const tok = usage.input || usage.output ? ` ${dim(usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output + '')} tok` : '';
-    const left = ` ${bold(green('ineed'))} ${dim(`v${VERSION}`)}${branch ? ' ' + cyan('(' + branch + ')') : ''}`;
-    const right =
-      ` ${mode === 'plan' ? yellow('plan') : green('build')} ${dim('/')} ${dim(state.reasoning)}` +
-      ` ${dim('/')} ${dim(ctxK + ' ctx')}${tok}` +
-      ` ${dim('/')} ${dim('mem:' + (state.memory === false ? 'off' : 'on'))}` +
-      ` ${dim('/')} ${mode === 'plan' ? dim('perm') : state.permEdit === 'ask' ? green('perm:ask') : dim('perm:auto')} `;
+    let model = trunc(modelTail(state.model), 40);
+    const items = ['  ' + T.model(model)];
+    if (mode === 'plan') items.push(T.warning('plan'));
+    items.push(T.muted(state.reasoning));
+    let base = items.join(T.muted('   ')) + T.muted('   ');
+    // a very wide terminal can still be beaten by a huge model id: shrink it first
+    if (plain(base).length > cols - 10) {
+      model = truncMid(model, Math.max(8, cols - 10 - (plain(base).length - plain(model).length)));
+      base = '  ' + T.model(model) + (mode === 'plan' ? T.muted('   ') + T.warning('plan') : '') + T.muted('   ') + T.muted(state.reasoning) + T.muted('   ');
+    }
+    const room = Math.max(8, cols - plain(base).length - 1);
+    let cwd = shortPath(process.cwd());
+    if (plain(cwd).length > room) cwd = truncMid(cwd, room);
     screen.at(statusRow, 1);
     screen.clearLine();
-    process.stdout.write(dim('─'.repeat(Math.max(0, cols - plain(left).length - plain(right).length))) + left + right);
+    process.stdout.write(base + T.path(cwd));
   }
 
   function scrollRegion() {
@@ -986,23 +1202,26 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   const SCROLL_STEP = 3; // lines per wheel tick: fine-grained, recent lines stay visible
 
-  function scrollUp() {
+  function scrollUp(lines = SCROLL_STEP) {
     const vis = chatBot - chatTop + 1;
     if (chatLines.length <= vis) return; // everything already fits
-    if (followTail) { viewStart = Math.max(0, chatLines.length - vis - SCROLL_STEP); followTail = false; }
-    else viewStart = Math.max(0, viewStart - SCROLL_STEP);
+    if (followTail) { viewStart = Math.max(0, chatLines.length - vis - lines); followTail = false; }
+    else viewStart = Math.max(0, viewStart - lines);
     redrawChat();
     drawInputBox();
   }
 
-  function scrollDown() {
+  function scrollDown(lines = SCROLL_STEP) {
     const vis = chatBot - chatTop + 1;
     if (followTail) return;
-    viewStart = Math.min(Math.max(0, chatLines.length - vis), viewStart + SCROLL_STEP);
+    viewStart = Math.min(Math.max(0, chatLines.length - vis), viewStart + lines);
     if (viewStart >= chatLines.length - vis) { followTail = true; viewStart = 0; }
     redrawChat();
     drawInputBox();
   }
+
+  // a page at a time for PageUp/PageDown
+  const pageStep = () => Math.max(3, (chatBot - chatTop + 1) >> 1);
 
   function tuiPrint(text) {
     for (const l of wrapLines(String(text), Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
@@ -1021,7 +1240,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     setTimeout(() => {
       for (const m of h) {
         if (m.role === 'user') tuiUserLine(String(m.content ?? ''));
-        else if (m.content) tuiPrint(box([dim('  (earlier) ') + trunc(String(m.content).replaceAll('\n', ' '), 90)]));
+        else if (m.content) tuiPrint(T.muted('  (earlier) ') + T.muted(trunc(String(m.content).replaceAll('\n', ' '), 90)));
       }
       drawStatus();
       scrollRegion();
@@ -1029,7 +1248,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   function tuiUserLine(input) {
-    for (const l of wrapLines(userBubble(input), Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
+    for (const l of wrapLines(userBlock(input), Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
     redrawChat();
   }
 
@@ -1044,14 +1263,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   function drawPicker() {
     if (!pickerActive || !pickerItems.length) return;
     const cols = process.stdout.columns || 80;
-    const maxShow = Math.min(pickerItems.length, Math.max(3, inputBoxTop - chatTop - 1));
+    const anchor = composerAnchor();
+    const maxShow = Math.min(pickerItems.length, Math.max(3, anchor - chatTop - 1));
     const start = Math.max(0, Math.min(pickerSelected - Math.floor(maxShow / 2), pickerItems.length - maxShow));
     let buf = '';
     for (let i = 0; i < maxShow; i++) {
       const item = pickerItems[start + i];
       const sel = start + i === pickerSelected;
-      const label = (sel ? green('› ') : '  ') + cyan(item);
-      buf += `\x1b[${inputBoxTop - maxShow + i};1H\x1b[2K` + trunc(label, cols - 1);
+      const label = (sel ? T.accent('› ') : '  ') + T.command(item);
+      buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + trunc(label, cols - 1);
     }
     pickerRows = maxShow;
     process.stdout.write(buf);
@@ -1062,7 +1282,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     pickerActive = false;
     const rowsWiped = pickerRows;
     pickerItems = []; pickerSelected = 0; pickerRows = 0;
-    if (restoreChat) { chatBot = inputBoxTop - 1; redrawChat(); drawInputBox(); scrollRegion(); }
+    if (restoreChat) { chatBot = chatFloor(); redrawChat(); drawInputBox(); scrollRegion(); }
     else if (rowsWiped) { /* zone repaint happens on next redraw */ }
   }
 
@@ -1073,30 +1293,34 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       pickerSelected = 0;
       pickerResolver = resolve;
       // lift the chat floor so streaming/approval output cannot paint over the list
-      chatBot = inputBoxTop - 1 - Math.min(items.length, Math.max(3, inputBoxTop - chatTop - 1));
+      chatBot = chatFloor();
       scrollRegion();
       drawPicker();
     });
   }
 
-  const layout = () => {
+  // Geometry: conversation viewport on top, live working line, flat composer,
+  // bottom status bar. Everything recomputes on resize; the composer can grow
+  // with multiline input and the viewport shrinks to make room.
+  const layout = (opts = {}) => {
     const rows = process.stdout.rows || 24;
-    const headerRows = 6;
-    statusRow = rows - 1;
-    composerRows = Math.min(COMPOSER_ROWS, Math.max(4, rows - headerRows - 3));
-    inputBoxTop = statusRow - composerRows;    // composer sits right above the status line
-    chatTop = Math.min(headerRows + 1, inputBoxTop - 1);
-    chatBot = inputBoxTop - 1 - (menuOpen ? Math.min(menuItems.length, Math.max(3, inputBoxTop - chatTop - 1)) : 0);
-    screen.at(1, 1);
-    process.stdout.write('\x1b[2J');
-    drawHeader();
+    statusRow = rows;
+    composerRows = composerRowsFor(busy ? typedAhead : (rl.line ?? ''), Math.max(10, (process.stdout.columns || 80) - 7), (process.stdout.columns || 80));
+    workRow = statusRow - composerRows;        // live working line above the composer
+    composerTop = workRow + 1;                 // composer: workRow+1 .. statusRow-1
+    chatTop = 1;                               // full-height conversation, no header
+    chatBot = Math.max(chatTop, composerAnchor() - 1);
+    if (opts.clear) { screen.at(1, 1); process.stdout.write('\x1b[2J'); }
     redrawChat();
+    if (menuOpen) drawMenu();
+    if (pickerActive) drawPicker();
+    drawWorking();
     drawInputBox();
     drawStatus();
     scrollRegion();
   };
 
-  rl.on('resize', layout);
+  rl.on('resize', () => layout({ clear: true }));
 
   // typed-ahead input while busy: echo it inside the input box; slash menu when typing /
   let typedAhead = '';
@@ -1124,6 +1348,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       }
       return; // swallowed: readline never sees mouse bytes
     }
+    // keyboard scrollback: PageUp/PageDown, shift+arrows.
+    // Old conversation stays readable while a task streams below.
+    if (key.name === 'pageup' || (key.shift && key.name === 'up')) { scrollUp(pageStep()); return; }
+    if (key.name === 'pagedown' || (key.shift && key.name === 'down')) { scrollDown(pageStep()); return; }
     if (pickerActive) {
       // the list selector owns up/down/enter/esc; everything else goes to readline
       if (key.name === 'up') { pickerSelected = Math.max(0, pickerSelected - 1); drawPicker(); return; }
@@ -1154,13 +1382,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       // pick BEFORE clearing: clearMenu resets the list, so read the item first
       const picked = menuItems[menuSelected].cmd;
       menuOpen = false; menuItems = []; menuSelected = 0; menuDrawnRows = 0;
-      chatBot = inputBoxTop - 1; // lift the menu zone back, wipe leftover menu rows
+      chatBot = chatFloor(); // lift the menu zone back, wipe leftover menu rows
       redrawChat();
       // fill the readline buffer with the picked command and repaint
       if (!busy) { rl.write(picked); }
       else typedAhead = picked;
       drawInputBox();
       return;
+    }
+    // Esc: closes an open menu when idle, interrupts the running task when busy
+    if (key.name === 'escape' && !key.ctrl && !key.meta) {
+      if (busy && activeRun) { activeRun.abort(); tuiPrint(T.muted('  (stopping...')); return; }
+      if (menuOpen) { clearMenu(); return; }
+      return; // swallow, do not insert anything into the input
     }
     if (!busy) {
       // idle: readline owns the input; just update the box text and menu from rl.line
@@ -1197,8 +1431,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   screen.enter();
   screen.mouse(true);
-  layout();
+  layout({ clear: true });
+  // first-open brand block: the ANSI-shadow logo leads the conversation once,
+  // then scrolls away naturally. Falls back to the one-liner on narrow terms.
+  const bootCols = process.stdout.columns || 80;
+  if (bootCols >= 47) for (const l of logo().split('\n')) chatLines.push(l);
+  else chatLines.push(green(bold('ineed')));
+  chatLines.push(BANNER() + dim(trunc(` · ${state.model} · ${shortPath(process.cwd())}`, Math.max(10, bootCols - 48))));
+  chatLines.push('');
   printWelcome();
+  redrawChat();
   scrollRegion();
   tuiReady = true;   // history rendering and stream-reset hooks may paint from here
 }
