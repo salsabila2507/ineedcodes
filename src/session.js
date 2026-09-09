@@ -7,9 +7,9 @@ import * as readline from 'node:readline';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { clearConfig, normalize, saveConfig } from './config.js';
-import { runObjective, pushTurn } from './agent.js';
+import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
 import { fetchModels } from './provider.js';
-import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen } from './ui.js';
+import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
 import { wizard } from './wizard.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
 import { saveSession, listSessions, loadSession } from './sessions.js';
@@ -25,23 +25,50 @@ function currentBranch(cwd) {
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
-// ANSI-aware truncation for painted single lines (escapes do not count as width)
+const ESC_RE = /^\x1b\[[0-9;?]*[a-zA-Z]/;
+
+// ANSI-aware truncation for painted single lines: escapes carry zero width,
+// '...' is part of the n budget, and any open color is closed before the cut
 const ansiTrunc = (s, n) => {
+  if (visLen(s) <= n) return s;
+  const budget = Math.max(0, n - 3);
   let vis = 0, i = 0, out = '';
   while (i < s.length) {
     if (s[i] === '\x1b') {
       // copy whole escape sequences verbatim so the cut never splits one
-      const m = /^\x1b\[[0-9;?]*[a-zA-Z]/.exec(s.slice(i));
+      const m = ESC_RE.exec(s.slice(i));
       if (m) { out += m[0]; i += m[0].length; continue; }
       i++;
       continue;
     }
-    if (vis >= n) return out + '...';
+    const c = s.codePointAt(i);
+    const cw = cpWidth(c);
+    if (vis + cw > budget) {
+      if (out.includes('\x1b[')) out += '\x1b[0m';   // keep colors from leaking
+      return out + '...';
+    }
+    out += String.fromCodePoint(c);
+    vis += cw;
+    i += c > 0xffff ? 2 : 1;
+  }
+  return out;
+};
+
+// like ansiTrunc but pads the visible part up to exactly n columns
+const ansiPad = (s, n) => {
+  let vis = 0, i = 0, out = '';
+  while (i < s.length) {
+    if (s[i] === '\x1b') {
+      const m = ESC_RE.exec(s.slice(i));
+      if (m) { out += m[0]; i += m[0].length; continue; }
+      i++;
+      continue;
+    }
     out += s[i];
     vis++;
     i++;
   }
-  return out;
+  return out + ' '.repeat(Math.max(0, n - vis));
 };
 
 // /home/user/ineedcodes -> ~/ineedcodes (only when actually inside the home dir)
@@ -176,14 +203,28 @@ function wrapLines(text, width) {
   for (const raw of String(text).split('\n')) {
     let line = raw;
     if (line === '') { out.push(''); continue; }
-    while (plain(line).length > width) {
+    while (visLen(line) > width) {
       let vis = 0, i = 0;
       while (i < line.length && vis < width) {
-        if (line[i] === '\x1b') { while (i < line.length && line[i] !== 'm') i++; }
-        else vis++;
-        i++;
+        if (line[i] === '\x1b') {
+          // whole sequences (CSI and friends) carry zero width; anything else
+          // is copied through and never counted
+          const m = ESC_RE.exec(line.slice(i));
+          if (m) i += m[0].length;
+          else i++;
+          continue;
+        }
+        const c = line.codePointAt(i);
+        const cw = cpWidth(c);
+        if (vis + cw > width) break;   // wide char does not fit: wrap first
+        vis += cw;
+        i += c > 0xffff ? 2 : 1;
       }
-      out.push(line.slice(0, i));
+      // trailing escapes belong to the visible cut (colors stay balanced)
+      let end = i;
+      let m;
+      while ((m = ESC_RE.exec(line.slice(end))) && m.index === 0) end += m[0].length;
+      out.push(line.slice(0, end));
       line = line.slice(i);
     }
     out.push(line);
@@ -259,7 +300,17 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const allSlash = lines.every(x => x.startsWith('/'));
     if (allSlash) {
       // separate commands (possibly interleaved with prose-only lines): run each
-      for (const line of lines) { const t = line.trim(); if (t) handleRef?.(t); }
+      // one after another, so /exit cannot race with the command before it
+      void (async () => {
+        try {
+          for (const line of lines) {
+            const t = line.trim();
+            if (!t) continue;
+            if (closed) return;
+            await handleRef?.(t);
+          }
+        } catch (err) { say(red('  ✗ ' + (err?.message ?? String(err)))); }
+      })();
       return;
     }
     const joined = lines.join('\n').replace(/^\n+|\n+$/g, '');
@@ -275,12 +326,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // While a raw prompt is pending (approval, /model, /resume...) the prompt is
   // printed directly, so echo stays on just for it.
   let askPending = false;
+  let rlClosed = false;   // set when readline has closed (EOF) but a task still runs
   // Paste coalescing works on any real terminal (Windows consoles included).
   // Pipes and tests keep the exact line-by-line behavior.
   const ask = makeInput(rl, process.stdout.isTTY ? dispatchLine : (l => handleRef?.(l)), p => { askPending = p; });
   if (TUI) rl._writeToOutput = s => { if (askPending) process.stdout.write(s); };
   // EOF (Ctrl+D or closed pipe): exit cleanly, unless a task is still running
   rl.on('close', () => {
+    rlClosed = true;
     if (!busy) doExit();
     else {
       const wait = setInterval(() => { if (!busy) { clearInterval(wait); doExit(); } }, 200);
@@ -328,10 +381,21 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       else return;   // Esc on the picker cancels, no second prompt
     }
     if (chosen === null) {
+      // plain REPL: the numbered list must actually be visible to pick from
+      ordered.forEach((m, i) => say(`   ${i + 1}. ${m}`));
       const pick = await ask('   Model (number or full id, empty = keep current): ');
-      if (!pick) return;
-      const idx = Number(pick);
-      chosen = Number.isInteger(idx) && idx >= 1 && idx <= list.length ? list[idx - 1] : pick;
+      const t = pick.trim();
+      if (!t) return;
+      if (/^\d+$/.test(t)) {
+        const idx = Number(t);
+        if (idx >= 1 && idx <= ordered.length) chosen = ordered[idx - 1];
+        else { say(red(`   No model number ${t}. Pick 1-${ordered.length}.`)); return; }
+      } else if (/^[A-Za-z0-9._:\/-]{1,120}$/.test(t)) {
+        chosen = t;   // full id typed by hand
+      } else {
+        say(red('   That does not look like a model id.'));
+        return;
+      }
     }
     Object.assign(state, normalize({ ...state, model: chosen }));
     try { saveConfig(state); } catch {}
@@ -341,17 +405,30 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   let lastStreamedForHooks = '';
   let streamFlushTimer = null;
-  let streamFlushedCount = 0;
-  let streamBaseLines = null;
+  let streamAnchor = -1;      // chatLines index where the growing answer starts
+  let streamPainted = 0;      // lines the last flush painted for this stream
   const chatLines = [];
 
   function flushStreamed() {
     if (!TUI || !lastStreamedForHooks) return;
-    if (streamBaseLines === null) streamBaseLines = chatLines.length;
-    chatLines.length = streamBaseLines; // re-render the growing answer in place
-    for (const l of wrapLines(lastStreamedForHooks, Math.max(10, (process.stdout.columns || 80) - 4))) chatLines.push(l);
+    const wrapped = wrapLines(lastStreamedForHooks, Math.max(10, (process.stdout.columns || 80) - 4));
+    if (streamAnchor < 0 || streamAnchor > chatLines.length) streamAnchor = chatLines.length;
+    // replace only the lines this stream painted; anything said in between
+    // (tool lines, notes, approvals) keeps its place below the growing answer
+    chatLines.splice(streamAnchor, streamPainted);
+    chatLines.splice(streamAnchor, 0, ...wrapped);
+    streamPainted = wrapped.length;
     redrawChat();
   }
+
+  // a new reasoning round streams as its own block: the previous round's text
+  // stays painted, this round starts a fresh growing answer
+  const resetStream = () => {
+    lastStreamedForHooks = '';
+    streamAnchor = -1;
+    streamPainted = 0;
+    if (streamFlushTimer) { clearTimeout(streamFlushTimer); streamFlushTimer = null; }
+  };
 
   function hooksForRun(stopSpinner) {
     let spinner = null;
@@ -372,7 +449,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       spinnerStop: () => { stop(); stopWork(); },
       onMemoryStart: () => { stop(); spinner = boxSpin('Recalling memory'); },
       onMemoryEnd: () => stop(),
-      onThinkingStart: () => { stop(); spinner = boxSpin('Working'); },
+      onThinkingStart: () => { stop(); resetStream(); spinner = boxSpin('Working'); },
       onThinkingEnd: () => stop(),
       onWorkStart: label => { stop(); spinner = boxSpin(label || 'Working'); },
       onWorkEnd: () => stop(),
@@ -413,7 +490,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       },
       onMCP: names => { if (names.length) say(T.muted('  MCP tools available: ' + names.join(', '))); },
       onMCPResult: (name, out) => { say(fmtResultLine(name, out)); },
-        onNote: note => { stop(); if (note.includes('applying your steer')) { lastStreamedForHooks = ''; streamFlushedCount = 0; streamBaseLines = null; if (typeof tuiReady !== 'undefined' && tuiReady) { chatLines.length = 0; redrawChat(); } } say(T.muted('  ◇ ' + note)); },
+        onNote: note => {
+          stop();
+          if (note.includes('applying your steer')) {
+            // drop only the stale partial of the interrupted call; the rest of
+            // the transcript (logo, prior turns, tool output) stays intact
+            resetStream();
+            if (TUI && typeof tuiReady !== 'undefined' && tuiReady) redrawChat();
+          }
+          say(T.muted('  ◇ ' + note));
+        },
         onUsage: u => { usage = u; if (TUI) drawStatus(); },
         drainSteer: () => steerQueue.splice(0),
       onSteer: list => { for (const s of list) say(T.warning('  ↳ steer: ') + T.text(s)); },
@@ -443,15 +529,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   async function runTask(input, retries = 0) {
     busy = true;
-    lastStreamedForHooks = '';
-    streamFlushedCount = 0;
-    streamBaseLines = null;   // fresh anchor per task, or task 2 would wipe task 1's output
+    resetStream();
     lastToolName = null;
     runStartedAt = Date.now();
     if (TUI) tuiUserLine(input);
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
     startWork('Working');
+    let retrying = false;   // the retry's own finally owns the cleanup then
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
       // kill a pending stream flush before painting the verdict, or it would
@@ -472,11 +557,27 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       try { history = await compactHistory(state, history, { onNote: n => say(T.muted('  ◇ ' + n)) }); } catch {}
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
-        say(T.warning('  ■ Stopped') + T.muted(' - partly done. Ask me to continue.'));
+        if (res.stopReason === 'step_limit') {
+          say(T.warning('  ■ Out of steps') + T.muted(` - hit the ${MAX_STEPS} step limit before finishing.`));
+        } else {
+          say(T.warning('  ■ Stopped') + T.muted(' - you interrupted the task.'));
+        }
+        // partial report: what actually happened before the stop, so "partly
+        // done" is never a dead end with nothing to show
+        if (res.changed?.length) say('  ' + T.muted('files touched: ') + T.text(res.changed.join(', ')));
+        if (res.ran?.length) say('  ' + T.muted(`commands run: ${res.ran.length}`) + T.muted(' (last: ') + T.text(trunc(String(res.ran[res.ran.length - 1]), 60)) + T.muted(')'));
+        const doneTodos = res.todos?.filter(t => t.status === 'completed').length ?? 0;
+        if (res.todos?.length) say('  ' + T.muted(`checklist: ${doneTodos}/${res.todos.length} done`));
+        const follow = res.stopReason === 'step_limit' ? ' Say "continue" to pick up where it left off.' : ' Ask me to continue when ready.';
+        say(T.muted('  ' + follow.trim()));
       } else {
         // flat summary: no card, just the result line plus the answer text
         say('  ' + T.success('✓ Done') + (res.changed?.length ? T.muted('  files: ' + res.changed.join(', ')) : ''));
-        const answerIsStreamed = lastStreamedForHooks && res.answer === lastStreamedForHooks;
+        // compare stripped text and use includes(): wrapLines repaints in place,
+        // so byte equality is too brittle. Only in TUI, where streaming actually
+        // painted something; in plain mode the answer must always be printed
+        const answerIsStreamed = TUI && lastStreamedForHooks
+          && plain(res.answer ?? '').includes(plain(lastStreamedForHooks));
         if (res.answer && !answerIsStreamed) String(res.answer).split('\n').slice(0, 14).forEach(l => say('  ' + l));
         else if (answerIsStreamed) say(T.muted('  (streamed above)'));
         else if (!res.changed?.length) say(T.muted('  (no output)'));
@@ -498,23 +599,24 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         if (TUI) drawInputBox();
         const hint = state.lastGood && state.lastGood !== state.model ? ` [l] back to ${prettyModel(state.lastGood)}` : '';
         const a = (await ask(`  [m] pick another model${hint} · [r] retry · [Enter] skip: `)).trim().toLowerCase();
-        if (a === 'm') { await pickModel(); return runTask(input, retries + 1); }
+        // awaited so finally does not clear busy/activeRun while the retry runs
+        if (a === 'm') { await pickModel(); retrying = true; return await runTask(input, retries + 1); }
         if (a === 'l' && state.lastGood && state.lastGood !== state.model) {
           Object.assign(state, normalize({ ...state, model: state.lastGood }));
           try { saveConfig(state); } catch {}
           say(green('  Model: ' + state.model));
-          return runTask(input, retries + 1);
+          retrying = true; return await runTask(input, retries + 1);
         }
-        if (a === 'r') return runTask(input, retries + 1);
+        if (a === 'r') { retrying = true; return await runTask(input, retries + 1); }
       }
     } finally {
-      busy = false;
-      activeRun = null;
-      working = false;
       runStartedAt = 0;
       lastToolName = null;
+      working = false;
       stopSpinner();
-      await afterTask();
+      busy = false;
+      activeRun = null;
+      if (!retrying) await afterTask();
     }
   }
 
@@ -953,6 +1055,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   }
 
   const plainPrompt = () => {
+    if (closed || rlClosed) return;   // a closed readline cannot take a prompt
     const branch = currentBranch(process.cwd());
     const tok = usage.input || usage.output ? ` ${usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output} tok` : '';
     rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green('❯')} `);
@@ -1115,7 +1218,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       + ' ' + T.muted(`(${secs}s · `) + T.muted('esc to interrupt') + T.muted(')');
     screen.at(workRow, 1);
     screen.clearLine();
-    process.stdout.write(ansiTrunc(line, cols - 1));
+    // pad to the full width so the previous frame can never peek through
+    process.stdout.write(ansiPad(ansiTrunc(line, cols - 1), cols - 1));
   }
 
   function startWork(label) {
@@ -1165,7 +1269,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     let buf = '';
     const row = (r, content) => {
       // one flat surface: panel background spans the full row, content on top
-      const vis = plain(content).length;
+      const vis = visLen(content);
       buf += `\x1b[${r};1H\x1b[2K` + bgOn('panel') + content + ' '.repeat(Math.max(0, cols - 1 - vis)) + resetOff();
     };
     const rail = working ? fgOn('divider') + '│' + fgOff() : fgOn('focus') + '│' + fgOff();
@@ -1200,13 +1304,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     items.push(T.muted(state.reasoning));
     let base = items.join(T.muted('   ')) + T.muted('   ');
     // a very wide terminal can still be beaten by a huge model id: shrink it first
-    if (plain(base).length > cols - 10) {
-      model = truncMid(model, Math.max(8, cols - 10 - (plain(base).length - plain(model).length)));
+    if (visLen(base) > cols - 10) {
+      model = truncMid(model, Math.max(8, cols - 10 - (visLen(base) - visLen(model))));
       base = '  ' + T.model(model) + (mode === 'plan' ? T.muted('   ') + T.warning('plan') : '') + T.muted('   ') + T.muted(state.reasoning) + T.muted('   ');
     }
-    const room = Math.max(8, cols - plain(base).length - 1);
+    const room = Math.max(8, cols - visLen(base) - 1);
     let cwd = shortPath(process.cwd());
-    if (plain(cwd).length > room) cwd = truncMid(cwd, room);
+    if (visLen(cwd) > room) cwd = truncMid(cwd, room);
     screen.at(statusRow, 1);
     screen.clearLine();
     process.stdout.write(base + T.path(cwd));
@@ -1231,7 +1335,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (!followTail) {
       const back = Math.max(0, chatLines.length - (viewStart + vis));
       const pos = ` ${back} lines back · mouse down to return `;
-      buf += `\x1b[${chatTop};${Math.max(1, (process.stdout.columns || 80) - plain(pos).length - 2)}H` + yellow(pos);
+      buf += `\x1b[${chatTop};${Math.max(1, (process.stdout.columns || 80) - visLen(pos) - 2)}H` + yellow(pos);
     }
     process.stdout.write(buf);
     scrollRegion();
@@ -1309,7 +1413,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const item = pickerItems[start + i];
       const sel = start + i === pickerSelected;
       const label = (sel ? T.accent('› ') : '  ') + T.command(item);
-      buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + trunc(label, cols - 1);
+      buf += `\x1b[${anchor - maxShow + i};1H\x1b[2K` + ansiTrunc(label, cols - 1);
     }
     pickerRows = maxShow;
     process.stdout.write(buf);
@@ -1426,9 +1530,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       menuOpen = false; menuItems = []; menuSelected = 0; menuDrawnRows = 0;
       chatBot = chatFloor(); // lift the menu zone back, wipe leftover menu rows
       redrawChat();
-      // fill the readline buffer with the picked command and repaint
-      if (!busy) { rl.write(picked); }
-      else typedAhead = picked;
+      // replace whatever partial is typed: the picked command takes its place,
+      // in the real readline buffer so Enter submits exactly what is shown
+      if (!busy) {
+        rl.write(null, { name: 'u', ctrl: true });   // clear the line, then fill it
+        rl.write(picked);
+      } else {
+        rl.write(null, { name: 'u', ctrl: true });
+        rl.write(picked);
+        typedAhead = picked;
+      }
       drawInputBox();
       return;
     }
@@ -1467,6 +1578,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const now = Date.now();
     if (now - lastSigint < 3000) return doExit();
     lastSigint = now;
+    // same affordance as the plain REPL: tell the user how to actually quit
+    tuiPrint(T.muted('  (Ctrl+C again to exit)'));
   });
 
   handleRef = handle;

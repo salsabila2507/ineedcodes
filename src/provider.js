@@ -91,6 +91,10 @@ export async function chat(cfg, messages, tools, signal, onDelta) {
 }
 
 // SSE stream: accumulate content and tool_calls, emit text deltas as they arrive.
+// The HTTP timeout only guards until the headers; a hung connection mid-stream
+// would otherwise wait forever, so a stall deadline cancels the reader instead.
+const STREAM_STALL_MS = 90_000;
+
 async function readStream(res, onDelta) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -99,36 +103,55 @@ async function readStream(res, onDelta) {
   const toolCalls = [];
   let usage = null;
   let role = 'assistant';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') continue;
-      let ev;
-      try { ev = JSON.parse(payload); } catch { continue; }
-      if (ev.usage) usage = ev.usage;
-      const d = ev.choices?.[0]?.delta;
-      if (!d) continue;
-      if (d.role) role = d.role;
-      if (d.content) {
-        content += d.content;
-        onDelta?.(d.content);
-      }
-      for (const tc of d.tool_calls ?? []) {
-        const i = tc.index ?? 0;
-        toolCalls[i] ??= { id: tc.id ?? ('call_' + i), type: 'function', function: { name: '', arguments: '' } };
-        if (tc.id) toolCalls[i].id = tc.id;
-        if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
-        if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
+  let stalled = false;
+  let stall = null;
+  const armStall = () => {
+    clearTimeout(stall);
+    stall = setTimeout(() => {
+      stalled = true;
+      try { reader.cancel(); } catch {}   // pending read() resolves done
+    }, STREAM_STALL_MS);
+  };
+  armStall();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      armStall();
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let ev;
+        try { ev = JSON.parse(payload); } catch { continue; }
+        if (ev.usage) usage = ev.usage;
+        const d = ev.choices?.[0]?.delta;
+        if (!d) continue;
+        if (d.role) role = d.role;
+        if (d.content) {
+          content += d.content;
+          onDelta?.(d.content);
+        }
+        for (const tc of d.tool_calls ?? []) {
+          const i = tc.index ?? 0;
+          toolCalls[i] ??= { id: tc.id ?? ('call_' + i), type: 'function', function: { name: '', arguments: '' } };
+          if (tc.id) toolCalls[i].id = tc.id;
+          if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
+          if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
+        }
       }
     }
+  } finally {
+    clearTimeout(stall);
   }
+  // a stalled stream can end mid tool-call: the partial JSON must never be
+  // returned as if it were a complete message. "(timed out)" puts it in the
+  // retryable class the session's recovery prompt already understands
+  if (stalled) throw new Error('stream stalled: no data for 90s (timed out)');
   const msg = { role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
   if (usage) msg._usage = { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 };
   return msg;

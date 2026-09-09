@@ -50,6 +50,9 @@ export function trimHistory(history) {
     if (total > MAX_HISTORY_CHARS) break;
     start = i;
   }
+  // never start inside a tool-call block: some providers reject a history whose
+  // first message is a tool result (or an assistant turn whose calls were cut)
+  while (start < history.length && history[start].role !== 'user') start++;
   return history.slice(start);
 }
 
@@ -172,7 +175,9 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const skills = extra.worker ? [] : listSkills(cwd, objective);
   const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
   const invokedSkill = !extra.worker
-    ? skills.find(s => new RegExp(`\\b${s.name}\\b`, 'i').test(objective) && /humanize|skill|pakai|gunakan|use/i.test(objective))
+    ? skills.find(s => s.name
+      && new RegExp(`\\b${s.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(objective)
+      && /humanize|skill|pakai|gunakan|use/i.test(objective))
     : null;
   const messages = [
     {
@@ -280,6 +285,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
         hooks.onTool?.(call.function?.name, input);
         let result;
+        let resultRendered = false;   // some hooks render the result themselves
         // enforce the role's tool allowlist at execution time, not just listing time
         if (extra.toolFilter && !extra.toolFilter.includes(call.function?.name)) {
           result = { output: `Refused: your role is not allowed to use ${call.function?.name}. Report what you need instead.` };
@@ -291,11 +297,18 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           const m = mcpMap.get(call.function?.name);
           result = await mcpManager.call(m.server, m.tool, input);
           hooks.onMCPResult?.(call.function?.name, result.output);
+          resultRendered = true;   // onResult below must not render it twice
         } else if (call.function?.name?.startsWith('git_')) {
+          const def = GIT_TOOL_DEFS.find(t => t.name === call.function?.name);
           if (plan) {
-            result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
+            // plan mode is read only, and the read-only git wrappers are part of
+            // its tool list: status/diff/log/branch execute, mutations refuse
+            result = def && !def.mutating
+              ? runGitTool(call.function?.name, input, cwd)
+              : { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
+          } else if (!def) {
+            result = { output: `Unknown tool: ${call.function?.name}` };
           } else {
-            const def = GIT_TOOL_DEFS.find(t => t.name === call.function?.name);
             let allowedNow = !def.mutating || cfg.permEdit === 'allow' || hooks.approved?.has('edit');
             if (!allowedNow && canAsk) {
               const verdict = await hooks.onApprove('edit', call.function?.name, input);
@@ -322,6 +335,9 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           if (plan) result = { output: 'Refused: plan mode is read only.' };
           else {
             const def = PROC_TOOL_DEFS.find(t => t.name === call.function?.name);
+            if (!def) {
+              result = { output: `Unknown tool: ${call.function?.name}` };
+            } else {
             let allowedNow = !def.mutating || cfg.permShell === 'allow' || hooks.approved?.has('shell');
             if (!allowedNow && canAsk) {
               const verdict = await hooks.onApprove('shell', call.function?.name, input);
@@ -329,6 +345,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
               allowedNow = Boolean(verdict);
             }
             result = allowedNow ? runProcTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
+            }
           }
         } else if (call.function?.name === 'shell') {
           if (plan) result = { output: 'Refused: plan mode is read only. Switch to build mode with /build.' };
@@ -383,7 +400,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             }
           }
         }
-        hooks.onResult?.(result.output);
+        if (!resultRendered) hooks.onResult?.(result.output);
         messages.push({ role: 'tool', tool_call_id: call.id, content: String(result.output).slice(0, 20_000) });
       }
     }
@@ -394,7 +411,15 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
     hooks.onRunEnd?.();
   }
   const stopped = ctrl.signal.aborted;
-  return { answer, changed: [...changed], ran, todos: [...todos], usage: { ...usage }, aborted: true, stopped };
+  // distinguish a user stop from the step limit: the report line differs
+  // ("Stopped" vs "ran out of steps"), and a step-limit stop is retryable
+  return {
+    answer, changed: [...changed], ran, todos: [...todos],
+    usage: { ...usage },
+    aborted: true,
+    stopped,
+    stopReason: stopped ? 'user' : 'step_limit'
+  };
 }
 
 export function pushTurn(history, objective, result) {

@@ -202,6 +202,24 @@ function mock(script) {
           else resp = reply('GITTOOLS-ABSENT sent=' + gitTools.join(','));
           break;
         }
+        case 'plangit': {
+          const gitTools = (parsed.tools ?? []).filter(t => t?.function?.name?.startsWith('git_')).map(t => t.function.name);
+          // joined accumulates every round: gate the next call on the absence
+          // of the refusal, not on the stale git_status output
+          if (!hadTools && gitTools.includes('git_status')) resp = call('git_status', {});
+          else if (hadTools && !joined.includes('Refused')) resp = call('git_commit', { message: 'should not happen' });
+          else resp = reply(joined.includes('Refused') && joined.includes('plan mode') ? 'PLANGIT-VERIFIED' : 'PLANGIT-BROKEN: ' + joined.slice(0, 150));
+          break;
+        }
+        case 'gitblock': {
+          if (toolResults.length < 3) resp = [
+            call('read_file', { path: '.git/config' }),
+            call('write_file', { path: '.git/hooks/pre-commit', content: '#!/bin/sh\necho pwned' }),
+            call('search_text', { pattern: 'url', path: '.git' })
+          ][toolResults.length];
+          else resp = reply(toolResults.every(r => r.startsWith('Refused')) ? 'GITBLOCK-VERIFIED' : 'GITBLOCK-LEAKED: ' + joined.slice(0, 150));
+          break;
+        }
         case 'webfetch': {
           if (!hadTools) resp = call('fetch_url', { url: 'http://127.0.0.1:' + (process.env.FAKE_WEB_PORT ?? '59999') + '/page' });
           else resp = reply(joined.includes('FAKE-WEB-CONTENT') ? 'WEBFETCH-VERIFIED' : 'WEBFETCH-BROKEN: ' + joined.slice(0, 120));
@@ -711,6 +729,15 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   spawnSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
   const { code, out } = await oneShot('gittool', 'what is the git status', { permEdit: 'allow' }, () => {}, { cwd: repo });
   check('git tools: first-class git_status works', code === 0 && out.includes('GITTOOL-VERIFIED'), out.slice(-300));
+
+  // plan mode: read-only git runs, mutating git refuses (consistency with the tool list)
+  const { code: pc, out: po } = await oneShot('plangit', 'check git state', { mode: 'plan' }, () => {}, { cwd: repo });
+  check('plan mode: git_status runs, git_commit refused', pc === 0 && po.includes('PLANGIT-VERIFIED'),
+    'code=' + pc + ' out=' + (po || '(empty)').slice(-300));
+
+  // .git/ internals are blocked for the file tools (config credentials, hooks are executable)
+  const { code: gc, out: go } = await oneShot('gitblock', 'inspect the git internals');
+  check('file tools: .git/ reads and writes blocked', gc === 0 && go.includes('GITBLOCK-VERIFIED'), go.slice(-300));
 }
 
 // ── web: fetch_url + honest search ──
