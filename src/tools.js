@@ -61,6 +61,14 @@ function isSecret(abs) {
   return SECRET_PATTERNS.some(re => re.test(abs));
 }
 
+// .git/ internals are off limits for the file tools: .git/config can carry
+// remote URLs with embedded credentials, and a writable .git/hooks/ is code
+// execution. Everything the agent legitimately needs is covered by the
+// first-class git_* tools.
+function isGitInternal(abs) {
+  return /(^|\/)\.git(\/|$)/.test(abs);
+}
+
 export const TOOLS = [
   {
     name: 'list_files',
@@ -185,6 +193,7 @@ export function runTool(name, input, cwd) {
   try {
     const abs = path.resolve(cwd, String(input.path ?? ''));
     if (!underRoot(abs, cwd)) return { output: 'Refused: path is outside the working directory.' };
+    if (isGitInternal(abs)) return { output: 'Refused: .git/ internals stay off limits (config can hold credentials, hooks are executable). Use the git_status/git_diff/git_log tools instead.' };
     if (name === 'list_files') {
       const out = [];
       const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache']);
@@ -231,6 +240,7 @@ export function runTool(name, input, cwd) {
       return { output: out.length ? out.join('\n') : '(no matches)' };
     }
     if (name === 'write_file') {
+      if (isSecret(abs)) return { output: 'Refused: that path looks like a secret file, and secrets never enter or leave the model context.' };
       const content = String(input.content ?? '');
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, content);
@@ -249,6 +259,7 @@ export function runTool(name, input, cwd) {
       return { output: `Edited ${path.relative(cwd, abs)}.` };
     }
     if (name === 'delete_file') {
+      if (isSecret(abs)) return { output: 'Refused: that looks like a secret file. Delete secrets yourself if you are sure.' };
       fs.unlinkSync(abs);
       return { output: `Deleted ${path.relative(cwd, abs)}.` };
     }
@@ -271,12 +282,18 @@ export function runTool(name, input, cwd) {
     if (name === 'copy_file') {
       const dest = path.resolve(cwd, String(input.to ?? ''));
       if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      // both ends checked: a copy is just a read+write, and would bypass the
+      // secret-file block (copy .env to notes.txt, then read notes.txt)
+      if (isSecret(abs) || isSecret(dest)) return { output: 'Refused: secret files stay where they are, so keys never end up in readable files.' };
+      if (isGitInternal(dest)) return { output: 'Refused: writing into .git/ is blocked (hooks are executable).' };
       fs.copyFileSync(abs, dest);
       return { output: `Copied ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}.` };
     }
     if (name === 'move_file') {
       const dest = path.resolve(cwd, String(input.to ?? ''));
       if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      if (isSecret(abs) || isSecret(dest)) return { output: 'Refused: secret files stay where they are, so keys never end up in readable files.' };
+      if (isGitInternal(dest)) return { output: 'Refused: writing into .git/ is blocked (hooks are executable).' };
       fs.renameSync(abs, dest);
       return { output: `Moved ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}.` };
     }

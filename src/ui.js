@@ -108,7 +108,27 @@ export const gray = t => wrap('90', t);
 
 export const trunc = (s, n = 120) => {
   const o = String(s).replaceAll('\n', ' ');
-  return o.length > n ? o.slice(0, n - 3) + '...' : o;
+  if (visLen(o) <= n) return o;
+  // budget the ellipsis: visible width of the kept part is n-3. Escapes are
+  // skipped, never split, and closed before the cut so colors cannot leak
+  const keep = Math.max(0, n - 3);
+  let w = 0, i = 0;
+  while (i < o.length) {
+    if (o[i] === '\x1b') {
+      const m = /^\x1b\[[0-9;?]*[a-zA-Z]/.exec(o.slice(i));
+      if (m) { i += m[0].length; continue; }
+      i++;
+      continue;
+    }
+    const c = o.codePointAt(i);
+    const cw = cpWidth(c);
+    if (w + cw > keep) break;
+    w += cw;
+    i += c > 0xffff ? 2 : 1;
+  }
+  let out = o.slice(0, i);
+  if (out.includes('\x1b[')) out += '\x1b[0m';
+  return out + '...';
 };
 
 // Terminal-safe markdown: **bold** becomes ANSI bold (or disappears without color),
@@ -124,14 +144,44 @@ export const mdTerm = t => {
 
 const plain = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
+// ── display width helpers (CJK / fullwidth / emoji take 2 columns) ──
+// combining marks take 0; astral code points (emoji) take 2
+export const cpWidth = c => {
+  if (c === 0x200b || (c >= 0x0300 && c <= 0x036f)) return 0;
+  if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff)
+    || (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf)
+    || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe4f)
+    || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || c > 0xffff) return 2;
+  return 1;
+};
+
+// visible width of a string: ANSI escapes are skipped, wide code points count 2,
+// and surrogate pairs are never split mid-run
+export const visLen = s => {
+  const t = String(s);
+  let w = 0;
+  for (let i = 0; i < t.length;) {
+    if (t[i] === '\x1b') {
+      const m = /^\x1b\[[0-9;?]*[a-zA-Z]/.exec(t.slice(i));
+      if (m) { i += m[0].length; continue; }
+      i++;
+      continue;
+    }
+    const c = t.codePointAt(i);
+    w += cpWidth(c);
+    i += c > 0xffff ? 2 : 1;
+  }
+  return w;
+};
+
 // Square flat box around lines. Width follows the longest line, capped to the
 // terminal. Used by command views; crisp corners, no web-style rounding.
 export function box(lines, colorFn = t => t) {
   const cols = process.stdout.columns || 80;
-  const inner = Math.min(cols - 4, Math.max(10, ...lines.map(l => plain(l).length)) + 2);
+  const inner = Math.min(cols - 4, Math.max(10, ...lines.map(l => visLen(l))) + 2);
   const top = colorFn('┌' + '─'.repeat(inner) + '┐');
   const bot = colorFn('└' + '─'.repeat(inner) + '┘');
-  const mid = lines.map(l => colorFn('│') + ' ' + l + ' '.repeat(Math.max(0, inner - plain(l).length - 1)) + colorFn('│'));
+  const mid = lines.map(l => colorFn('│') + ' ' + l + ' '.repeat(Math.max(0, inner - visLen(l) - 1)) + colorFn('│'));
   return [top, ...mid, bot].join('\n');
 }
 
@@ -172,11 +222,21 @@ export function userBlock(text) {
   for (const raw of String(text).split('\n')) {
     let line = raw;
     do {
-      const cut = line.slice(0, inner);
+      // cut at display width `inner`, never splitting a surrogate pair, so
+      // wrapLines never has to split the band afterwards
+      let cut = '', w = 0, i = 0;
+      while (i < line.length) {
+        const c = line.codePointAt(i);
+        const cw = cpWidth(c);
+        if (w + cw > inner) break;
+        cut += String.fromCodePoint(c);
+        w += cw;
+        i += c > 0xffff ? 2 : 1;
+      }
       const head = first ? '  ' + marker : '    ';
-      lines.push(band(head + cut + ' '.repeat(Math.max(0, inner - cut.length)) + ' '));
+      lines.push(band(head + cut + ' '.repeat(Math.max(0, inner - w)) + ' '));
       first = false;
-      line = line.slice(inner);
+      line = line.slice(i);
     } while (line.length > 0);
   }
   return lines.join('\n');

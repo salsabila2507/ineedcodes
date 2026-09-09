@@ -96,8 +96,9 @@ if (args[0] === '--child') {
   }
 }
 
-// one-shot task: keep this process alive as the parent, run the worker as a child
-if (args.length > 0 && args[0] !== '--reset') {
+// one-shot task: keep this process alive as the parent, run the worker as a child.
+// --reset/--resume/-r are interactive flags and must not be treated as an objective.
+if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
   const { fileURLToPath } = await import('node:url');
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', ...args], { stdio: 'inherit' });
   child.on('exit', code => process.exit(code ?? 1));

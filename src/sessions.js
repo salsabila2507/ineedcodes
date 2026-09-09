@@ -16,7 +16,15 @@ export function newSessionId(d = new Date()) {
 
 export function saveSession(data) {
   fs.mkdirSync(DIR, { recursive: true });
-  const id = data.id || newSessionId();
+  let id = data.id || newSessionId();
+  if (!data.id) {
+    // two sessions started in the same minute must not overwrite each other:
+    // the later one gets a -2, -3, ... suffix
+    const base = id;
+    for (let n = 2; fs.existsSync(path.join(DIR, id + '.json')) && n < 100; n++) {
+      id = `${base}-${n}`;
+    }
+  }
   fs.writeFileSync(path.join(DIR, id + '.json'), JSON.stringify({ ...data, id, time: Date.now() }, null, 2), { mode: 0o600 });
   return id;
 }
