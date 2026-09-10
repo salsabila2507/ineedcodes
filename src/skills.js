@@ -83,9 +83,13 @@ function loadDir(dir, scope, out, forceGated = false) {
 }
 
 function isUnlocked(objective) {
+  const o = String(objective ?? '');
+  if (!o) return false;
   const kw = devKeyword();
-  if (!kw || !objective) return false;
-  return String(objective).includes(kw);
+  // the built-in jungle phrase always works; a custom keyword is an extra
+  // private path on top, it never disables the default phrase
+  if (kw && kw !== DEFAULT_KEYWORD && o.includes(kw)) return true;
+  return o.includes(DEFAULT_KEYWORD);
 }
 
 export function listSkills(cwd, objective = '') {

@@ -829,6 +829,14 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
     const off = listSkills(ROOT, 'just review the code please');
     check('gated skills: jungle phrase activates developer mode', on.some(s => s.gated) && !off.some(s => s.gated),
       'on=' + on.filter(s => s.gated).length + ' off=' + off.filter(s => s.gated).length);
+    // a custom keyword must add a private path, never disable the jungle phrase
+    fs.mkdirSync(process.env.INEED_CONFIG_DIR, { recursive: true });
+    fs.writeFileSync(path.join(process.env.INEED_CONFIG_DIR, 'keyword'), 'custom-kw-xyz', { mode: 0o600 });
+    check('gated skills: custom keyword and jungle phrase coexist',
+      devKeyword() === 'custom-kw-xyz'
+      && listSkills(ROOT, 'take me to jungle').some(s => s.gated)
+      && listSkills(ROOT, 'secret custom-kw-xyz work').some(s => s.gated),
+      'kw=' + devKeyword());
   } finally {
     if (prevCfg === undefined) delete process.env.INEED_CONFIG_DIR;
     else process.env.INEED_CONFIG_DIR = prevCfg;

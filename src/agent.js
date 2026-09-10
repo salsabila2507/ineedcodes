@@ -173,7 +173,14 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const projectInstructions = extra.worker ? '' : loadProjectInstructions(cwd);
   const depthNote = extra.worker ? '' : (cfg.explain === 'short' ? '\nAnswer style: short. Give results, skip explanations unless asked.' : cfg.explain === 'deep' ? '\nAnswer style: deep. Include reasoning, trade-offs, and what you ruled out.' : '');
   const skills = extra.worker ? [] : listSkills(cwd, objective);
-  const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
+  // a big catalog with full descriptions reaches 38k+ chars, which slows every
+  // request of the task: past a threshold list names only and load the full
+  // instructions on mention, so prompts stay small
+  const skillsFull = skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n');
+  const skillsBlock = !skills.length ? ''
+    : skillsFull.length > 8_000
+      ? `\nInstalled skills (${skills.length} available; mention one by name and its full instructions load):\n${skills.map(s => `- ${s.name} (${s.scope})`).join('\n')}`
+      : `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skillsFull}`;
   // developer mode (jungle keyword present) has no extra hoops: a named gated
   // skill activates on mention alone; the builtin humanizer still wants an ask
   if (skills.some(s => s.gated)) hooks.onNote?.('developer mode aktif - gunakan dengan bijak, hanya untuk target yang kamu miliki izinnya');
@@ -252,11 +259,11 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
       const calls = msg.tool_calls ?? [];
       if (calls.length === 0) {
-        // task finished: store durable knowledge only when something actually changed
+        // task finished: store durable knowledge only when something actually
+        // changed. Fire-and-forget: awaiting it adds the full icm round-trip
+        // (seconds) after the answer, before the user sees "Done"
         if (memory && answer && (changed.size > 0 || ran.length > 0) && !ctrl.signal.aborted) {
-          try {
-            await memory.store(`project ${cwd}: ${objective.slice(0, 150)} -> ${answer.slice(0, 300)}`);
-          } catch {}
+          memory.store(`project ${cwd}: ${objective.slice(0, 150)} -> ${answer.slice(0, 300)}`).catch(() => {});
         }
         return { answer, changed: [...changed], ran, todos: [...todos], usage: { ...usage }, aborted: false };
       }

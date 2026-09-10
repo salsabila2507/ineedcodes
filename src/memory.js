@@ -31,8 +31,9 @@ export const ICMAdapter = {
   name: 'icm',
 
   // recall relevant durable memory for an objective. Returns '' when nothing/no icm.
+  // Short inputs (chatter like "udah?" or "halo") skip the recall round-trip
   async recall(query) {
-    if (!query?.trim()) return '';
+    if (!query?.trim() || query.trim().length < 10) return '';
     const out = await icm(['recall', query.slice(0, 200), '--limit', '3', '--read-only']);
     if (!out) return '';
     const lines = out.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('memories['));

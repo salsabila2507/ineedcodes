@@ -954,9 +954,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         else say(red(`No skill named ${argClean}.`));
         return;
       }
-      // listing unlocks the same way a task does: the objective must contain
-      // the keyword. A custom unlock (ineed unlock / env) always shows them
-      const objective = input.includes(kw) ? input : (kw !== DEFAULT_KEYWORD ? kw : input);
+      // listing unlocks the same way a task does: the objective must contain the
+      // keyword (custom or the built-in jungle phrase). A custom unlock shows
+      // them even when the input carries nothing special
+      const objective = (input.includes(kw) || input.includes(DEFAULT_KEYWORD))
+        ? input
+        : (kw !== DEFAULT_KEYWORD ? kw : input);
       const all = listSkills(process.cwd(), objective);
       const gated = all.filter(x => x.gated).length;
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
