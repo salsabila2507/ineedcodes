@@ -816,6 +816,25 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('gated skills: hidden without the keyword', code === 0 && out.includes('GATE-LOCKED'), out.slice(-300));
 }
 
+// ── default developer keyword: "take me to jungle" ──
+{
+  // sandbox the config dir BEFORE the import: CONFIG_DIR is read at module load,
+  // so the real ~/.ineedcodes/keyword cannot leak into this test
+  const prevCfg = process.env.INEED_CONFIG_DIR;
+  process.env.INEED_CONFIG_DIR = path.join(TMP, 'kw-cfg');
+  try {
+    const { devKeyword, listSkills, DEFAULT_KEYWORD } = await import('../src/skills.js');
+    check('gated skills: default keyword is the jungle phrase', devKeyword() === DEFAULT_KEYWORD && devKeyword() === 'take me to jungle', devKeyword());
+    const on = listSkills(ROOT, 'take me to jungle and run the sqli skill');
+    const off = listSkills(ROOT, 'just review the code please');
+    check('gated skills: jungle phrase activates developer mode', on.some(s => s.gated) && !off.some(s => s.gated),
+      'on=' + on.filter(s => s.gated).length + ' off=' + off.filter(s => s.gated).length);
+  } finally {
+    if (prevCfg === undefined) delete process.env.INEED_CONFIG_DIR;
+    else process.env.INEED_CONFIG_DIR = prevCfg;
+  }
+}
+
 // ── no em dash anywhere in shipped source ──
 {
   const files = ['src/cli.js', 'src/ui.js', 'src/config.js', 'src/provider.js', 'src/tools.js', 'src/agent.js', 'src/wizard.js', 'src/session.js', 'README.md', 'package.json', 'LICENSE'];

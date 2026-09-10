@@ -30,7 +30,7 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
 
   ${green('ineed')}                        interactive session (first open: setup)
   ${green('ineed "fix the build errors"')}  one-shot task
-  ${green('ineed unlock')}                 enable gated skills on this machine
+  ${green('ineed unlock')}                 set a custom developer keyword (default: "take me to jungle")
   ${green('ineed --reset')}                 redo provider setup
   ${green('ineed --version')}               show version
 
@@ -64,6 +64,8 @@ if (args[0] === 'unlock') {
   try { fs.chmodSync(keywordFile, 0o600); } catch {}
   console.log(green('Gated skills unlocked on this machine.'));
   console.log(dim('Saved to ' + keywordFile + ' (0600). Use them by mentioning the keyword in a task, e.g. /skills or "use the sqli skill".'));
+  console.log(dim('(No unlock needed by default: saying "take me to jungle" in a task activates them. A custom keyword overrides the phrase.)'));
+  console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
   process.exit(0);
 }
 

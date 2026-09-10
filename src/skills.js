@@ -3,9 +3,11 @@
 // Frontmatter: name, description, tools (optional restriction), instructions body below.
 //
 // GATED SKILLS: SKILL.md files whose frontmatter carries "gated: true" stay invisible
-// unless the objective text contains the developer keyword. The keyword itself lives
-// OUTSIDE this repository: in the INEED_DEV_KEYWORD environment variable or in
-// ~/.ineedcodes/keyword (chmod 600). A fresh install cannot unlock gated skills.
+// unless the objective text contains the developer keyword. The keyword resolves to
+// the built-in jungle phrase by default ("take me to jungle"), and can be overridden
+// with a private one via the INEED_DEV_KEYWORD environment variable or via
+// `ineed unlock` (stores it in ~/.ineedcodes/keyword, chmod 600).
+// Activating them shows a responsible-use warning: authorized targets only.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -16,9 +18,14 @@ const PKG_SKILLS = path.join(path.dirname(url.fileURLToPath(import.meta.url)), '
 
 const KEYWORD_FILE = path.join(CONFIG_DIR, 'keyword');
 
+// the built-in phrase that activates developer skills: say it inside a task,
+// e.g. "take me to jungle, run the sqli skill against the lab target"
+export const DEFAULT_KEYWORD = 'take me to jungle';
+
 export function devKeyword() {
   if (process.env.INEED_DEV_KEYWORD) return String(process.env.INEED_DEV_KEYWORD).trim();
-  try { return fs.readFileSync(KEYWORD_FILE, 'utf8').trim(); } catch { return ''; }
+  try { const f = fs.readFileSync(KEYWORD_FILE, 'utf8').trim(); if (f) return f; } catch {}
+  return DEFAULT_KEYWORD;
 }
 
 const BUILTIN = [

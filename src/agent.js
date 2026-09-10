@@ -174,10 +174,13 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   const depthNote = extra.worker ? '' : (cfg.explain === 'short' ? '\nAnswer style: short. Give results, skip explanations unless asked.' : cfg.explain === 'deep' ? '\nAnswer style: deep. Include reasoning, trade-offs, and what you ruled out.' : '');
   const skills = extra.worker ? [] : listSkills(cwd, objective);
   const skillsBlock = skills.length ? `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skills.map(s => `- ${s.name} (${s.scope}): ${s.description}`).join('\n')}` : '';
+  // developer mode (jungle keyword present) has no extra hoops: a named gated
+  // skill activates on mention alone; the builtin humanizer still wants an ask
+  if (skills.some(s => s.gated)) hooks.onNote?.('developer mode aktif - gunakan dengan bijak, hanya untuk target yang kamu miliki izinnya');
   const invokedSkill = !extra.worker
     ? skills.find(s => s.name
       && new RegExp(`\\b${s.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(objective)
-      && /humanize|skill|pakai|gunakan|use/i.test(objective))
+      && (s.gated || /humanize|skill|pakai|gunakan|use/i.test(objective)))
     : null;
   const messages = [
     {
@@ -188,7 +191,10 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         + skillsBlock
     },
     ...trimHistory(history),
-    { role: 'user', content: objective + (invokedSkill ? `\n\n[skill ${invokedSkill.name} activated] ${invokedSkill.instructions.slice(0, 2_000)}` : '') }
+    { role: 'user', content: objective + (invokedSkill
+      ? `\n\n[skill ${invokedSkill.name} activated] ${invokedSkill.instructions.slice(0, 2_000)}`
+        + (invokedSkill.gated ? '\n[developer skill: authorized security testing only - gunakan dengan bijak]' : '')
+      : '') }
   ];
   const changed = new Set();
   const ran = [];

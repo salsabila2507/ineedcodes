@@ -16,7 +16,7 @@ import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
 import { spawnSync } from 'node:child_process';
 import { mcpConfigured } from './mcp.js';
-import { listSkills, findSkill, devKeyword } from './skills.js';
+import { listSkills, findSkill, devKeyword, DEFAULT_KEYWORD } from './skills.js';
 
 function currentBranch(cwd) {
   const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' });
@@ -935,9 +935,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return;
     }
     if (input === '/skills' || input.startsWith('/skills ')) {
+      const kw = devKeyword();
       const arg = input.slice(7).trim();
-      if (arg) {
-        const s = findSkill(arg, process.cwd(), input);
+      // the keyword may ride along ("/skills take me to jungle", "/skills sqli take me to jungle"):
+      // strip it so the remainder is the actual skill name to look up
+      const argClean = kw ? arg.split(kw).join('').trim() : arg;
+      if (argClean) {
+        const s = findSkill(argClean, process.cwd(), input);
         if (s) {
           say(T.muted(`  ── skill ${s.name} ──`) + T.muted(` (${s.scope}${s.gated ? ', gated' : ''})`));
           say('  ' + T.text(s.description));
@@ -945,16 +949,23 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           say(T.muted('  instructions:'));
           for (const l of s.instructions.slice(0, 1_500).split('\n').slice(0, 40)) say('  ' + T.text(l));
           say(T.muted('Say "use ' + s.name + ' to ..." and the agent follows them.'));
+          if (s.gated) say(T.warning('  ⚠ gunakan dengan bijak: hanya untuk target yang kamu miliki izinnya.'));
         }
-        else say(red(`No skill named ${arg}.`));
+        else say(red(`No skill named ${argClean}.`));
         return;
       }
-      const machineUnlocked = devKeyword() !== '';
-      const all = listSkills(process.cwd(), machineUnlocked ? devKeyword() : input);
-      const gated = machineUnlocked ? all.filter(x => x.gated).length : -1;
+      // listing unlocks the same way a task does: the objective must contain
+      // the keyword. A custom unlock (ineed unlock / env) always shows them
+      const objective = input.includes(kw) ? input : (kw !== DEFAULT_KEYWORD ? kw : input);
+      const all = listSkills(process.cwd(), objective);
+      const gated = all.filter(x => x.gated).length;
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
-      if (gated > 0) say(dim(`  (+${gated} gated security skills unlocked on this machine)`));
-      else if (!machineUnlocked) say(dim(`  gated security skills are locked on this machine - run ${bold('ineed unlock')} to enable`));
+      if (gated > 0) {
+        say(dim(`  (+${gated} gated security skills aktif)`));
+        say(T.warning('  ⚠ gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
+      } else {
+        say(dim(`  security skills terkunci. ketik ${bold('"take me to jungle"')} di task untuk mengaktifkan, atau ${bold('ineed unlock')} untuk keyword pribadi`));
+      }
       return;
     }
     if (input === '/new') {
