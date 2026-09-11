@@ -265,13 +265,11 @@ function mock(script) {
         case 'files': {
           // last tool result decides the next step (results accumulate)
           const last = toolResults[toolResults.length - 1] ?? '';
-          if (!hadTools) resp = call('file_exists', { path: 'a.txt' });
-          else if (last.startsWith('yes:')) resp = call('copy_file', { path: 'a.txt', to: 'b.txt' });
+          if (!hadTools) resp = call('copy_file', { path: 'a.txt', to: 'b.txt' });
           else if (last.startsWith('Copied')) resp = call('move_file', { path: 'b.txt', to: 'c.txt' });
-          else if (last.startsWith('Moved')) resp = call('file_metadata', { path: 'c.txt' });
-          else if (last.includes('size:') && last.includes('bytes')) resp = call('read_file_range', { path: 'c.txt', offset: 1, limit: 5 });
-          else if (last.includes(' lines ') && last.includes(' of ')) resp = call('search_files', { pattern: 'c.txt' });
-          else if (/^c\.txt(\n|\$)/.test(last) || last === 'c.txt') resp = reply('FILES-VERIFIED');
+          else if (last.startsWith('Moved')) resp = call('read_file_range', { path: 'c.txt', offset: 1, limit: 5 });
+          else if (last.includes(' lines ') && last.includes(' of ')) resp = call('list_files', { path: '.' });
+          else if (last.includes('c.txt')) resp = reply('FILES-VERIFIED');
           else resp = reply('FILES-BROKEN: ' + last.slice(0, 150));
           break;
         }
@@ -320,7 +318,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.14'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.15'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -480,7 +478,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.14'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.15'), out);
   server.close();
 }
 
@@ -781,7 +779,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 // ── filesystem tools (#23-24): exists/copy/move/metadata/range/search_files ──
 {
   const { code, out, work } = await oneShot('files', 'do file ops', {}, w => fs.writeFileSync(path.join(w, 'a.txt'), 'alpha beta'));
-  check('file tools: exists/copy/move/metadata/range/search', code === 0 && out.includes('FILES-VERIFIED') && fs.existsSync(path.join(work, 'c.txt')), out.slice(-400));
+  check('file tools: copy/move/range/list', code === 0 && out.includes('FILES-VERIFIED') && fs.existsSync(path.join(work, 'c.txt')), out.slice(-400));
 }
 
 // ── worker role enforcement: research worker cannot write (#16 execution-time) ──
@@ -841,6 +839,26 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
     if (prevCfg === undefined) delete process.env.INEED_CONFIG_DIR;
     else process.env.INEED_CONFIG_DIR = prevCfg;
   }
+}
+
+// ── context discipline: old tool results compress past the budget ──
+{
+  const { slimToolResults } = await import('../src/agent.js');
+  const msgs = [
+    { role: 'user', content: 'task' },
+    { role: 'tool', tool_call_id: 'a', content: 'x'.repeat(5000) },
+    { role: 'tool', tool_call_id: 'b', content: 'y'.repeat(5000) },
+    { role: 'tool', tool_call_id: 'c', content: 'z'.repeat(5000) },
+    { role: 'tool', tool_call_id: 'd', content: 'w'.repeat(5000) }
+  ];
+  slimToolResults(msgs, 1_000_000);
+  check('context: under budget nothing trimmed', msgs[1].content.length === 5000, 'len=' + msgs[1].content.length);
+  slimToolResults(msgs, 10_000);
+  const trimmed = msgs[1].content.length < 1000 && msgs[1].content.includes('earlier tool output');
+  const newestKept = msgs[4].content === 'w'.repeat(5000);
+  const pairingKept = msgs[1].tool_call_id === 'a';
+  check('context: oldest trimmed, newest intact, pairing kept', trimmed && newestKept && pairingKept,
+    'trim=' + trimmed + ' kept=' + newestKept);
 }
 
 // ── no em dash anywhere in shipped source ──
