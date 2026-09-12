@@ -318,7 +318,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.15'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.16'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -478,7 +478,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.15'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.16'), out);
   server.close();
 }
 
@@ -859,6 +859,27 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const pairingKept = msgs[1].tool_call_id === 'a';
   check('context: oldest trimmed, newest intact, pairing kept', trimmed && newestKept && pairingKept,
     'trim=' + trimmed + ' kept=' + newestKept);
+}
+
+// ── skills-sync: opt-in download of gated skills into the config dir ──
+{
+  // build a local source repo so the test never touches the network
+  const srcRepo = path.join(TMP, 'skills-src');
+  fs.mkdirSync(path.join(srcRepo, 'skills', 'sync-demo-skill'), { recursive: true });
+  fs.writeFileSync(path.join(srcRepo, 'skills', 'sync-demo-skill', 'SKILL.md'),
+    '---\nname: sync-demo-skill\ndescription: synced skill for tests\ngated: true\n---\nbody');
+  spawnSync('git', ['init', '-q', '-b', 'main', srcRepo]);
+  spawnSync('git', ['-C', srcRepo, 'add', '-A']);
+  spawnSync('git', ['-C', srcRepo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'skills']);
+  process.env.INEED_SKILLS_REPO = srcRepo;
+  try {
+    const { code, out } = await run(['skills-sync']);
+    check('skills-sync: downloads skills into config dir', code === 0
+      && out.includes('Synced 1 skill')
+      && fs.existsSync(path.join(CFG, 'skills', 'sync-demo-skill', 'SKILL.md')), out.slice(-300));
+  } finally {
+    delete process.env.INEED_SKILLS_REPO;
+  }
 }
 
 // ── no em dash anywhere in shipped source ──

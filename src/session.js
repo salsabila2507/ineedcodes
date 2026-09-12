@@ -102,16 +102,12 @@ function toolLabel(name, input = {}) {
     case 'read_file': return ['Reading', p(input.path)];
     case 'read_file_range': return ['Reading', p(input.path)];
     case 'list_files': return ['Listing', p(input.path) || '.'];
-    case 'list_tracked_files': return ['Listing', 'tracked files'];
     case 'search_text': return ['Searching', `"${trunc(p(input.pattern), 40)}"`];
-    case 'search_files': return ['Finding files', `"${trunc(p(input.pattern), 40)}"`];
     case 'write_file': return ['Writing', p(input.path)];
     case 'edit_file': return ['Editing', p(input.path)];
     case 'delete_file': return ['Deleting', p(input.path)];
     case 'copy_file': return ['Copying', `${p(input.path)} -> ${p(input.to)}`];
     case 'move_file': return ['Moving', `${p(input.path)} -> ${p(input.to)}`];
-    case 'file_exists': return ['Checking', p(input.path)];
-    case 'file_metadata': return ['Inspecting', p(input.path)];
     case 'shell': return ['Running', trunc(p(input.command), 70), true];
     case 'fetch_url': return ['Fetching', trunc(p(input.url), 60)];
     case 'web_search': return ['Searching web', `"${trunc(p(input.query), 40)}"`];
@@ -967,7 +963,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         say(dim(`  (+${gated} gated security skills aktif)`));
         say(T.warning('  ⚠ gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
       } else {
-        say(dim(`  security skills terkunci. ketik ${bold('"take me to jungle"')} di task untuk mengaktifkan, atau ${bold('ineed unlock')} untuk keyword pribadi`));
+        say(dim(`  security skills gak ada atau terkunci. jalankan ${bold('ineed skills-sync')} untuk mengunduhnya dari repo, aktifkan di task dengan ${bold('"take me to jungle"')}`));
       }
       return;
     }

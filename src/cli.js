@@ -31,6 +31,7 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
   ${green('ineed')}                        interactive session (first open: setup)
   ${green('ineed "fix the build errors"')}  one-shot task
   ${green('ineed unlock')}                 set a custom developer keyword (default: "take me to jungle")
+  ${green('ineed skills-sync')}            download the gated security skills (opt-in)
   ${green('ineed --reset')}                 redo provider setup
   ${green('ineed --version')}               show version
 
@@ -65,6 +66,22 @@ if (args[0] === 'unlock') {
   console.log(green('Gated skills unlocked on this machine.'));
   console.log(dim('Saved to ' + keywordFile + ' (0600). Use them by mentioning the keyword in a task, e.g. /skills or "use the sqli skill".'));
   console.log(dim('(No unlock needed by default: saying "take me to jungle" in a task activates them. A custom keyword overrides the phrase.)'));
+  console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
+  process.exit(0);
+}
+
+// skills-sync: opt-in download of the gated security skills from the source
+// repository. The npm package ships a clean core, so skills live outside it.
+if (args[0] === 'skills-sync') {
+  const { skillsSync } = await import('./skillssync.js');
+  console.log(dim('Downloading skills from the source repository...'));
+  const r = skillsSync();
+  if (!r.ok) {
+    console.error(red('skills-sync failed: ' + r.error));
+    process.exit(1);
+  }
+  console.log(green(`Synced ${r.copied} skill(s) to ${r.dest}.`));
+  console.log(dim('Activate them in a task by saying "take me to jungle", or set a custom keyword with ineed unlock.'));
   console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
   process.exit(0);
 }
