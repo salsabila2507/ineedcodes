@@ -30,6 +30,7 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
 
   ${green('ineed')}                        interactive session (first open: setup)
   ${green('ineed "fix the build errors"')}  one-shot task
+  ${green('ineed provider')}               list/switch/add API providers
   ${green('ineed unlock')}                 set a custom developer keyword (default: "take me to jungle")
   ${green('ineed skills-sync')}            download the gated security skills (opt-in)
   ${green('ineed --reset')}                 redo provider setup
@@ -84,6 +85,72 @@ if (args[0] === 'skills-sync') {
   console.log(dim('Activate them in a task by saying "take me to jungle", or set a custom keyword with ineed unlock.'));
   console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
   process.exit(0);
+}
+
+// provider: manage saved providers (any OpenAI-compatible API). Switch with
+// `ineed provider use <name>`, add with `ineed provider add <name>`.
+if (args[0] === 'provider') {
+  const { normalize, addProvider, setActiveProvider, removeProvider, providerNames } = await import('./config.js');
+  const cfg = loadConfig() ?? normalize({});
+  const names = providerNames(cfg);
+  const sub = (args[1] ?? '').trim();
+
+  if (!sub || sub === 'list') {
+    if (!names.length) {
+      console.log(yellow('No providers saved yet.'));
+      console.log(dim('  Add one:  ') + bold('ineed provider add <name>') + dim('   (or just run ineed for first-time setup)'));
+      process.exit(0);
+    }
+    console.log(bold('Providers'));
+    for (const n of names) {
+      const p = cfg.providers[n];
+      console.log('  ' + (n === cfg.provider ? green('*') : ' ') + ' ' + bold(n)
+        + dim('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
+    }
+    console.log(dim('\n  switch: ineed provider use <name>   add: ineed provider add <name>   remove: ineed provider remove <name>'));
+    process.exit(0);
+  }
+
+  if (sub === 'use') {
+    const name = (args[2] ?? '').trim();
+    const next = setActiveProvider(cfg, name);
+    if (!next) { console.error(red('No provider named ' + (name || '(empty)') + '.')); process.exit(1); }
+    console.log(green('Provider: ' + next.provider) + dim('  ' + next.baseUrl + '  model: ' + next.model));
+    process.exit(0);
+  }
+
+  if (sub === 'add') {
+    const name = (args[2] ?? '').trim();
+    if (!name) { console.error(red('Usage: ineed provider add <name>')); process.exit(1); }
+    const readline = await import('node:readline');
+    const { makeInput } = await import('./ui.js');
+    const { wizard } = await import('./wizard.js');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ask = makeInput(rl);
+    try {
+      const prof = await wizard(ask, { fromCommand: true, save: false });
+      rl.close();
+      const next = addProvider(cfg, name, prof);
+      if (!next) { console.error(red('Could not save that provider.')); process.exit(1); }
+      console.log(green('Provider "' + name + '" saved and active.') + dim('  ' + next.baseUrl + '  model: ' + next.model));
+    } catch {
+      rl.close();
+      console.error(red('Aborted. Nothing saved.'));
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (sub === 'remove') {
+    const name = (args[2] ?? '').trim();
+    const next = removeProvider(cfg, name);
+    if (!next) { console.error(red('No provider named ' + (name || '(empty)') + '.')); process.exit(1); }
+    console.log(green('Removed "' + name + '".') + (next.provider ? dim(' Active: ' + next.provider) : dim(' No providers left.')));
+    process.exit(0);
+  }
+
+  console.error(red('Usage: ineed provider [list | use <name> | add <name> | remove <name>]'));
+  process.exit(1);
 }
 
 // internal: one-shot worker. Spawned by the branch below, never run by users.

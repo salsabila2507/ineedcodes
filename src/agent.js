@@ -25,6 +25,26 @@ export const MAX_STEPS = 30;
 export const MAX_HISTORY_CHARS = 30_000;
 export const MAX_TURNS = 40;
 
+// context discipline: as a task grows, older tool results become dead weight
+// the model still pays for on every call. Past the budget, the oldest tool
+// outputs compress to their first lines; the newest few always stay intact.
+const TOOL_CONTEXT_BUDGET = 80_000;
+
+export function slimToolResults(messages, budget = TOOL_CONTEXT_BUDGET) {
+  let total = 0;
+  for (const m of messages) total += String(m.content ?? '').length + 24;
+  if (total <= budget) return;
+  const toolIdx = [];
+  for (let i = 0; i < messages.length; i++) if (messages[i].role === 'tool') toolIdx.push(i);
+  for (let k = 0; k < toolIdx.length - 3 && total > budget; k++) {
+    const m = messages[toolIdx[k]];
+    const c = String(m.content ?? '');
+    if (c.length <= 400) continue;
+    total -= c.length - 400;
+    m.content = c.slice(0, 400) + '...[earlier tool output trimmed to stay in context]';
+  }
+}
+
 const SYSTEM = `You are ineed, an autonomous terminal agent on the user's machine.
 Rules:
 - Use the tools to do real work. Never invent output. Every success claim needs evidence from a tool result.
@@ -230,6 +250,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
       if (ctrl.signal.aborted) break;
       drainSteerInto();
+      slimToolResults(messages);
       let msg;
       try {
         hooks.onThinkingStart?.();

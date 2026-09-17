@@ -318,7 +318,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.16'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.17'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -478,7 +478,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.16'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.17'), out);
   server.close();
 }
 
@@ -838,6 +838,55 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   } finally {
     if (prevCfg === undefined) delete process.env.INEED_CONFIG_DIR;
     else process.env.INEED_CONFIG_DIR = prevCfg;
+  }
+}
+
+// ── providers: saved API configs, switch without redoing setup ──
+{
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: {
+      alpha: { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k-alpha', model: 'model-alpha' },
+      beta: { baseUrl: 'http://127.0.0.1:2/v1', apiKey: 'k-beta', model: 'model-beta' }
+    },
+    provider: 'alpha'
+  }, null, 2));
+
+  const list = await run(['provider']);
+  check('provider: lists saved providers', list.code === 0 && list.out.includes('alpha') && list.out.includes('beta') && list.out.includes('model-alpha'), list.out);
+
+  const use = await run(['provider', 'use', 'beta']);
+  const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('provider: use switches active without losing the others',
+    use.code === 0 && saved.provider === 'beta' && saved.baseUrl === 'http://127.0.0.1:2/v1'
+    && saved.providers.alpha.model === 'model-alpha', JSON.stringify(saved).slice(0, 200));
+
+  const session = await run([], { input: '/provider\n/provider alpha\n/config\n/exit\n' });
+  check('session: /provider lists then switches', session.code === 0
+    && session.out.includes('providers') && session.out.includes('Provider: alpha')
+    && session.out.includes('http://127.0.0.1:1/v1'), session.out.slice(-500));
+
+  const rm = await run(['provider', 'remove', 'beta']);
+  const after = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('provider: remove drops one profile', rm.code === 0 && !after.providers.beta && !!after.providers.alpha, JSON.stringify(after).slice(0, 200));
+}
+
+// ── env overrides: no config file at all (headless / CI / quick switch) ──
+{
+  const { server, port } = await mock('default');
+  fs.rmSync(CFG, { recursive: true, force: true });
+  process.env.INEED_BASE_URL = `http://127.0.0.1:${port}/v1`;
+  process.env.INEED_API_KEY = SECRET;
+  process.env.INEED_MODEL = 'mock-mini';
+  try {
+    const { code, out } = await run(['say hi']);
+    check('env: base url/key/model run with no config file',
+      code === 0 && !out.includes('Welcome!') && out.includes('Done'), out.slice(-300));
+  } finally {
+    delete process.env.INEED_BASE_URL;
+    delete process.env.INEED_API_KEY;
+    delete process.env.INEED_MODEL;
+    server.close();
   }
 }
 

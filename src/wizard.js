@@ -10,7 +10,7 @@ export async function testConnection(cfg, signal) {
   return String(m.content ?? '').trim();
 }
 
-export async function wizard(ask, { fromCommand = false } = {}) {
+export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   const inputEnded = () => process.stdin.readableEnded === true && !process.stdout.isTTY;
   const abortIfEnded = () => { if (inputEnded()) throw Object.assign(new Error('Setup aborted: input ended.'), { aborted: true }); };
 
@@ -113,6 +113,10 @@ export async function wizard(ask, { fromCommand = false } = {}) {
     }
   }
 
+  if (!save) {
+    console.log('');
+    return { baseUrl, apiKey, model };
+  }
   const cfg = saveConfig({ baseUrl, apiKey, model });
   console.log(green('   Saved to ~/.ineedcodes/config.json. You will not be asked again.'));
   console.log('');

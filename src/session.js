@@ -6,7 +6,7 @@
 import * as readline from 'node:readline';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { clearConfig, normalize, saveConfig } from './config.js';
+import { clearConfig, normalize, saveConfig, addProvider, setActiveProvider, removeProvider, providerNames } from './config.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
 import { fetchModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
@@ -633,6 +633,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   const commands = {
     '/help': () => {
       say('  ' + cyan('/model') + '    pick a model from your provider');
+      say('  ' + cyan('/provider') + ' list, switch, add or remove API providers');
       say('  ' + cyan('/plan') + '     plan mode: read only');
       say('  ' + cyan('/build') + '    build mode: real changes (default)');
       say('  ' + cyan('/reason') + '   toggle reasoning low/high');
@@ -658,6 +659,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     },
     '/config': () => {
       say(T.muted('  ── provider config ──'));
+      say('  ' + T.muted('provider') + '   ' + T.text(state.provider || '(none)'));
       say('  ' + T.muted('base URL') + '   ' + T.text(state.baseUrl));
       say('  ' + T.muted('model') + '      ' + T.text(state.model));
       say('  ' + T.muted('reasoning') + '  ' + T.text(state.reasoning));
@@ -730,7 +732,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (setting === 'edit' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permEdit: value })); persist(); say(green('  edit perm: ' + value)); return; }
       if (setting === 'shell' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permShell: value })); persist(); say(green('  shell perm: ' + value)); return; }
       if (setting === 'searchurl') { Object.assign(state, normalize({ ...state, searchUrl: parts.slice(1).join(' ') })); persist(); say(green('  searchUrl set.')); return; }
-      say(dim('  Settings: reasoning|depth|memory|humanizer|edit|shell|net|searchurl <value> · model via /model · mode via /plan /build'));
+      if (setting === 'baseurl' || setting === 'url') {
+        const url = parts.slice(1).join(' ').trim();
+        if (!/^https?:\/\//.test(url)) { say(red('  base URL must start with http:// or https://')); return; }
+        Object.assign(state, normalize({ ...state, baseUrl: url }));
+        saveConfig(state);
+        say(green('  base URL: ' + state.baseUrl) + T.muted('  (provider: ' + (state.provider || 'default') + ', model: ' + state.model + ')'));
+        if (TUI) drawStatus();
+        return;
+      }
+      say(dim('  Settings: reasoning|depth|memory|humanizer|edit|shell|net|baseurl|searchurl <value> · providers via /provider · model via /model · mode via /plan /build'));
       return;
     }
     if (input === '/config-menu') {
@@ -768,6 +779,58 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return afterTask();
     }
     if (input === '/clear') return commands['/clear']();
+    if (input === '/provider' || input.startsWith('/provider ')) {
+      const arg = input.slice(9).trim();
+      const names = providerNames(state);
+      if (!arg) {
+        say(T.muted('  ── providers ──'));
+        if (!names.length) say(yellow('  no providers saved') + T.muted('  · add: /provider add'));
+        for (const n of names) {
+          const p = state.providers[n];
+          say('  ' + (n === state.provider ? T.success('* ') : '  ') + T.text(n)
+            + T.muted('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
+        }
+        say(T.muted('  switch: /provider <name> · add: /provider add · remove: /provider remove <name>'));
+        return;
+      }
+      const parts = arg.split(/\s+/);
+      const head = parts[0].toLowerCase();
+      const switchTo = name => {
+        const next = setActiveProvider(state, name);
+        if (!next) { say(red(`  No provider named ${name}.`)); return; }
+        Object.assign(state, normalize(next));
+        say(green('  Provider: ' + state.provider) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
+        if (TUI) drawStatus();
+      };
+      if (head === 'use') { switchTo(parts[1] ?? ''); return; }
+      if (head === 'remove') {
+        if (!parts[1]) { say(T.muted('  usage: /provider remove <name>')); return; }
+        const next = removeProvider(state, parts[1]);
+        if (!next) { say(red(`  No provider named ${parts[1]}.`)); return; }
+        Object.assign(state, normalize(next));
+        say(green(`  Removed "${parts[1]}".`) + (state.provider ? T.muted(' Active: ' + state.provider) : T.muted(' No providers left.')));
+        if (TUI) drawStatus();
+        return;
+      }
+      if (head === 'add' || head === 'new') {
+        const name = (parts[1] ?? '').trim() || (await ask('   provider name (e.g. openai, local): ')).trim();
+        if (!name) return;
+        busy = true;
+        try {
+          say(dim(`   Setting up provider "${name}"...`));
+          const prof = await wizard(ask, { fromCommand: true, save: false });
+          const next = addProvider(state, name, prof);
+          if (!next) throw new Error('could not save the provider');
+          Object.assign(state, normalize(next));
+          say(green(`   Provider "${name}" saved and active.`) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
+          if (TUI) drawStatus();
+        } catch { say(red('   Setup aborted. Nothing changed.')); }
+        busy = false;
+        return afterTask();
+      }
+      switchTo(arg);   // bare name switches
+      return;
+    }
     if (input === '/model') { busy = true; try { await pickModel(); } finally { busy = false; } return afterTask(); }
     if (input === '/plan') { mode = 'plan'; Object.assign(state, normalize({ ...state, mode })); say(yellow('Plan mode: read only.')); if (TUI) drawStatus(); return; }
     if (input === '/build') { mode = 'build'; Object.assign(state, normalize({ ...state, mode })); say(green('Build mode: real changes.')); if (TUI) drawStatus(); return; }
@@ -826,6 +889,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (input === '/status') {
       say(T.muted('  ── Status ──'));
       say('  ' + T.muted('model') + '      ' + T.text(state.model));
+      say('  ' + T.muted('provider') + '   ' + T.text(state.provider || '(none)'));
       say('  ' + T.muted('mode') + '       ' + T.text(mode) + T.muted(' / reasoning ' + state.reasoning + ' / depth ' + state.explain));
       say('  ' + T.muted('perms') + '       ' + T.text('edit:' + state.permEdit + ' shell:' + state.permShell + ' net:' + state.permNet));
       say('  ' + T.muted('memory') + '      ' + T.text(state.memory === false ? 'off' : 'on (icm)'));
@@ -1046,7 +1110,24 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       busy = false;
       return afterTask();
     }
-    if (input === '/setup' || input === '/reset') {
+    if (input === '/setup') {
+      // reconfigure the active provider (add or update it), keep the other
+      // saved providers untouched
+      busy = true;
+      try {
+        const prof = await wizard(ask, { fromCommand: true, save: false });
+        const next = addProvider(state, state.provider || 'default', prof);
+        if (!next) throw new Error('could not save the provider');
+        Object.assign(state, normalize(next));
+        mode = state.mode;
+        setTheme(state.theme);
+        say(green('Ready. ' + state.provider + ' -> ' + state.model));
+        if (TUI) layout();
+      } catch { busy = false; say(red('Setup aborted. Nothing changed.')); return afterTask(); }
+      busy = false;
+      return afterTask();
+    }
+    if (input === '/reset') {
       clearConfig();
       say(dim('Config cleared. Running setup...'));
       busy = true;
@@ -1127,6 +1208,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // ── slash command menu: filters while you type / ──
   const SLASH_COMMANDS = [
     { cmd: '/model', desc: 'pick a model from your provider' },
+    { cmd: '/provider', desc: 'list, switch, add or remove API providers' },
     { cmd: '/plan', desc: 'plan mode: read only' },
     { cmd: '/build', desc: 'build mode: real changes (default)' },
     { cmd: '/reason', desc: 'toggle reasoning low/high' },

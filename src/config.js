@@ -1,4 +1,6 @@
 // config.js: load, validate, save provider config. Secrets never get printed here.
+// Multiple providers can be saved; the active one is mirrored on the top-level
+// fields (baseUrl/apiKey/model) so every other module keeps working unchanged.
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -8,20 +10,46 @@ export const CONFIG_DIR = process.env.INEED_CONFIG_DIR || path.join(os.homedir()
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export { CONFIG_DIR as configDirPath };
 
-export function loadConfig() {
-  try {
-    const c = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    if (c && typeof c.baseUrl === 'string' && typeof c.apiKey === 'string' && typeof c.model === 'string'
-      && c.baseUrl && c.model) return normalize(c);
-  } catch {}
-  return null;
+const cleanUrl = u => String(u ?? '').replace(/\/+$/, '');
+
+// resolve the providers map and the active name. A legacy flat config (baseUrl
+// at top level) migrates into a "default" provider, and top-level fields act as
+// overrides of the active provider so model/url changes keep working.
+function resolveProviders(c) {
+  const raw = (c.providers && typeof c.providers === 'object' && !Array.isArray(c.providers)) ? c.providers : {};
+  const providers = {};
+  for (const [name, p] of Object.entries(raw)) {
+    if (!p || typeof p !== 'object') continue;
+    providers[String(name)] = {
+      baseUrl: cleanUrl(p.baseUrl),
+      apiKey: String(p.apiKey ?? ''),
+      model: String(p.model ?? '')
+    };
+  }
+  let provider = String(c.provider ?? '');
+  if (!Object.keys(providers).length && (c.baseUrl || c.model)) {
+    providers.default = { baseUrl: cleanUrl(c.baseUrl), apiKey: String(c.apiKey ?? ''), model: String(c.model ?? '') };
+    provider = provider || 'default';
+  }
+  if (!providers[provider]) provider = Object.keys(providers)[0] ?? '';
+  if (provider) {
+    const active = providers[provider];
+    if (c.baseUrl !== undefined) active.baseUrl = cleanUrl(c.baseUrl);
+    if (c.apiKey !== undefined) active.apiKey = String(c.apiKey ?? '');
+    if (c.model !== undefined) active.model = String(c.model);
+  }
+  const active = provider ? providers[provider] : { baseUrl: '', apiKey: '', model: '' };
+  return { providers, provider, baseUrl: active.baseUrl, apiKey: active.apiKey, model: active.model };
 }
 
 export function normalize(c) {
+  const p = resolveProviders(c ?? {});
   return {
-    baseUrl: String(c.baseUrl).replace(/\/+$/, ''),
-    apiKey: String(c.apiKey ?? ''),
-    model: String(c.model),
+    providers: p.providers,
+    provider: p.provider,
+    baseUrl: p.baseUrl,
+    apiKey: p.apiKey,
+    model: p.model,
     reasoning: c.reasoning === 'high' ? 'high' : 'low',
     mode: c.mode === 'plan' ? 'plan' : 'build',
     memory: c.memory !== false,
@@ -42,12 +70,59 @@ export function normalize(c) {
   };
 }
 
+export function loadConfig() {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch {}
+  const cfg = normalize(raw ?? {});
+  // env overrides win over the file: switch provider or run headless with no
+  // config at all (INEED_BASE_URL / INEED_API_KEY / INEED_MODEL)
+  if (process.env.INEED_BASE_URL) cfg.baseUrl = cleanUrl(process.env.INEED_BASE_URL);
+  if (process.env.INEED_API_KEY) cfg.apiKey = String(process.env.INEED_API_KEY);
+  if (process.env.INEED_MODEL) cfg.model = String(process.env.INEED_MODEL);
+  if (!cfg.baseUrl || !cfg.model) return null;
+  return cfg;
+}
+
 export function saveConfig(c) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   const clean = normalize(c);
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
   try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
   return clean;
+}
+
+// ── provider profiles ──
+export function providerNames(cfg) {
+  return Object.keys(cfg?.providers ?? {});
+}
+
+export function setActiveProvider(cfg, name) {
+  const p = cfg?.providers?.[name];
+  if (!p) return null;
+  return saveConfig(normalize({ ...cfg, provider: name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model }));
+}
+
+export function addProvider(cfg, name, profile) {
+  const key = String(name ?? '').trim();
+  if (!key) return null;
+  const prof = {
+    baseUrl: cleanUrl(profile?.baseUrl),
+    apiKey: String(profile?.apiKey ?? ''),
+    model: String(profile?.model ?? '')
+  };
+  if (!prof.baseUrl || !prof.model) return null;
+  const providers = { ...(cfg?.providers ?? {}), [key]: prof };
+  // adding a provider makes it active: that is the usual intent
+  return saveConfig(normalize({ ...cfg, providers, provider: key, baseUrl: prof.baseUrl, apiKey: prof.apiKey, model: prof.model }));
+}
+
+export function removeProvider(cfg, name) {
+  const providers = { ...(cfg?.providers ?? {}) };
+  if (!providers[name]) return null;
+  delete providers[name];
+  const provider = cfg.provider === name ? (Object.keys(providers)[0] ?? '') : cfg.provider;
+  const p = providers[provider] ?? { baseUrl: '', apiKey: '', model: '' };
+  return saveConfig(normalize({ ...cfg, providers, provider, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model }));
 }
 
 export function clearConfig() {

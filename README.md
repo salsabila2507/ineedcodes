@@ -39,6 +39,25 @@ Any OpenAI-compatible API works: OpenAI, OmniRoute, LM Studio, Ollama, vLLM, and
 
 Pick your provider, paste your key, choose a model. Done once, never asked again.
 
+## Providers
+
+Save as many OpenAI-compatible providers as you want and switch between them instantly:
+
+```bash
+ineed provider                     # list saved providers, active one marked with *
+ineed provider add local           # guided setup for a new provider (tests it, saves it)
+ineed provider use openai          # switch provider
+ineed provider remove local        # drop one
+```
+
+Inside a session: `/provider` lists them, `/provider <name>` switches, `/provider add` sets one up, `/provider remove <name>` drops it. To only point the current provider at another endpoint: `/config baseurl http://localhost:11434/v1`.
+
+For scripts, CI, or a one-off run, environment variables override the config file entirely (no config needed):
+
+```bash
+INEED_BASE_URL=https://api.openai.com/v1 INEED_API_KEY=sk-... INEED_MODEL=gpt-4o-mini ineed "fix the tests"
+```
+
 ## Use
 
 ```bash
@@ -61,13 +80,14 @@ The agent decides what it needs: list files, read code, search, edit, run shell 
 | command | what it does |
 |---|---|
 | `/model` | pick a model from your provider |
+| `/provider` | list, switch, add or remove API providers |
 | `/plan` | read-only mode, the agent suggests but changes nothing |
 | `/build` | default mode, the agent makes real changes |
 | `/reason` | toggle reasoning effort low/high |
 | `/perm` | permission modes: `/perm auto`, `/perm safe` |
 | `/memory` | durable memory status, `/memory on\|off` |
 | `/mcp` | list MCP servers and their tools |
-| `/setup` | redo provider setup |
+| `/setup` | reconfigure the active provider (keeps the others) |
 | `/config` | show provider config, API key hidden |
 | `/clear` | forget the current conversation |
 | `/exit` | quit |
