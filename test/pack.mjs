@@ -24,7 +24,8 @@ check('npm pack produces tarball', Boolean(tarball));
 // 2. tarball contents: clean core only, no bundled skills (registry policy:
 //    skills are an opt-in download via `ineed skills-sync`)
 const listing = execSync('tar -tzf ' + path.join(TMP, tarball), { encoding: 'utf8' });
-const files = listing.trim().split('\n').map(f => f.replace(/^package\//, '')).filter(f => f && !f.endsWith('/'));
+// Windows bsdtar writes CRLF lines: split on both, or every path ends with \r
+const files = listing.trim().split(/\r?\n/).map(f => f.replace(/^package\//, '')).filter(f => f && !f.endsWith('/'));
 const expected = ['LICENSE', 'README.md', 'package.json',
   ...fs.readdirSync(path.join(ROOT, 'src')).map(f => 'src/' + f)
 ];
@@ -39,12 +40,15 @@ check('tarball has no junk', extra.length === 0, 'extra: ' + extra.join(', '));
 const prefix = path.join(TMP, 'prefix');
 execSync(`npm install --prefix ${JSON.stringify(prefix)} --no-audit --no-fund --silent ${JSON.stringify(path.join(TMP, tarball))}`, { stdio: 'pipe' });
 
-// 4. run the installed binary
-const bin = path.join(prefix, 'node_modules', '.bin', 'ineed');
-check('installed bin exists and is executable', fs.existsSync(bin) && !!(fs.statSync(bin).mode & 0o111));
-const v = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000 });
-check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.7.17'), v.stdout + v.stderr);
-const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000 });
+// 4. run the installed binary. npm ships three shims; POSIX execs the shebang
+// script directly, Windows needs the .cmd one (spawnSync of an extensionless
+// sh file fails there, and exec bits are a POSIX concept).
+const win = process.platform === 'win32';
+const bin = path.join(prefix, 'node_modules', '.bin', win ? 'ineed.cmd' : 'ineed');
+check('installed bin exists and is executable', fs.existsSync(bin) && (win || !!(fs.statSync(bin).mode & 0o111)));
+const v = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000, shell: win });
+check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.8.0'), v.stdout + v.stderr);
+const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000, shell: win });
 check('installed bin --help works', h.status === 0 && h.stdout.includes('one-shot task'), h.stdout + h.stderr);
 
 // 5. no ERR_MODULE_NOT_FOUND on any import path (the v0.2.0 killer)

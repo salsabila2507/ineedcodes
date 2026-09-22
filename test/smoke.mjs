@@ -61,7 +61,9 @@ function mock(script) {
           else resp = reply(joined.includes('ineed-shell-e2e') && joined.includes('exit code: 0') ? 'SHELL-VERIFIED' : 'SHELL-BROKEN');
           break;
         case 'shellfail':
-          if (!hadTools) resp = call('shell', { command: 'echo err-probe >&2; exit 3' });
+          // portable failing command (stderr + exit 3 on bash AND cmd.exe):
+          // `echo x >&2; exit 3` is bash-only, cmd would mangle it
+          if (!hadTools) resp = call('shell', { command: 'node -e "console.error(\'err-probe\');process.exit(3)"' });
           else resp = reply(joined.includes('err-probe') && joined.includes('exit code: 3') ? 'SHELLFAIL-VERIFIED' : 'SHELLFAIL-BROKEN');
           break;
         case 'edit':
@@ -318,7 +320,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.7.17'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.8.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -331,7 +333,7 @@ fs.rmSync(CFG, { recursive: true, force: true });
 }
 // ── reset with garbage input aborts cleanly instead of hanging ──
 fs.rmSync(CFG, { recursive: true, force: true });
-{ const { code, out } = await run(['--reset'], { input: 'not-a-url\n' }); check('--reset aborts cleanly on EOF', code === 1 && out.includes('Setup aborted'), out); }
+{ const { code, out } = await run(['--reset'], { input: 'not-a-url\n' }); check('--reset aborts cleanly on EOF', code === 1 && out.includes('Setup cancelled') && out.includes('nothing was saved'), out); }
 
 // ── wizard full flow ──
 fs.rmSync(CFG, { recursive: true, force: true });
@@ -339,10 +341,19 @@ fs.rmSync(CFG, { recursive: true, force: true });
   const { server, port } = await mock('default');
   const { code, out } = await run([], { input: `http://127.0.0.1:${port}/v1\n${SECRET}\n\n` });
   const cfgPath = path.join(CFG, 'config.json');
-  const mode = fs.existsSync(cfgPath) ? (fs.statSync(cfgPath).mode & 0o777) : 0;
   check('wizard: connects, suggests model, saves', code === 0 && out.includes('Connected. 3 models') && out.includes('Works.') && out.includes('Saved'), out);
   check('wizard: api key never echoed', !out.includes(SECRET), out);
-  check('wizard: config mode 0600', mode === 0o600, 'mode=' + mode.toString(8));
+  if (process.platform === 'win32') {
+    // NTFS has no mode bits: parity with 0600 is a user-only ACL on the file
+    const acl = (spawnSync('icacls', [cfgPath], { encoding: 'utf8' }).stdout ?? '').replace(/\r/g, '');
+    const user = process.env.USERNAME || process.env.USER || '';
+    const locked = Boolean(user) && acl.includes(user) && acl.includes('(F)')
+      && !acl.includes('Everyone') && !acl.includes('BUILTIN\\Users') && !acl.includes('Authenticated Users');
+    check('wizard: config locked to the current user (win32 ACL)', locked, acl || '(no icacls output)');
+  } else {
+    const mode = fs.existsSync(cfgPath) ? (fs.statSync(cfgPath).mode & 0o777) : 0;
+    check('wizard: config mode 0600', mode === 0o600, 'mode=' + mode.toString(8));
+  }
   const saved = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
   check('wizard: suggested model picked on Enter', saved.model === 'gpt-4o-mini', saved.model);
   check('wizard: no em dash in output', !/[\u2013\u2014]/.test(out), out);
@@ -478,8 +489,28 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.7.17'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.8.0'), out);
   server.close();
+}
+
+// ── session: /init writes AGENTS.md, merge keeps user notes ──
+{
+  const work = fs.mkdtempSync(path.join(TMP, 'init-'));
+  fs.writeFileSync(path.join(work, 'package.json'), JSON.stringify({ name: 'x', scripts: { test: 'node --test' } }));
+  fs.mkdirSync(CFG, { recursive: true });
+  // dummy provider: /init never calls the network, so an unreachable URL is fine
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm' }), { mode: 0o600 });
+  const { code, out } = await run([], { cwd: work, input: '/init\n/init\n/exit\n' });
+  const md = path.join(work, 'AGENTS.md');
+  const wrote = fs.existsSync(md);
+  const content = wrote ? fs.readFileSync(md, 'utf8') : '';
+  check('init: /init creates AGENTS.md', code === 0 && wrote && content.includes('# AGENTS.md') && content.includes('npm run test'), out);
+  check('init: second /init merges without duplicating', (content.match(/# AGENTS.md/g) || []).length === 1, content.slice(0, 200));
+  // user notes between the markers survive a re-run, even without the end marker
+  fs.writeFileSync(md, content.replace(/<!-- ineed:init begin -->/, '<!-- ineed:init begin -->\nNEVER TOUCH THE CONFIG\n').replace(/<!-- ineed:init end -->/, ''));
+  await run([], { cwd: work, input: '/init\n/exit\n' });
+  const merged = fs.readFileSync(md, 'utf8');
+  check('init: user notes survive merge (end marker missing too)', merged.includes('NEVER TOUCH THE CONFIG') && merged.includes('<!-- ineed:init end -->'), merged.slice(0, 300));
 }
 
 // ── permissions: session approval flow (y/a/n) ──
@@ -562,8 +593,17 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 {
   const fakeBin = path.join(TMP, 'fakebin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  fs.writeFileSync(path.join(fakeBin, 'icm'), '#!/bin/sh\ncase "$1" in\n  recall) echo "3 | FAKE-MEMORY-MARKER durable fact from previous session" ;;\n  remember) echo "stored" ;;\n  *) echo "icm" ;;\nesac\n');
-  fs.chmodSync(path.join(fakeBin, 'icm'), 0o755);
+  // one shared node shim + two launchers, so the fake `icm` works on every OS:
+  // POSIX resolves the shebang script, Windows (shell:true) needs an .cmd
+  fs.writeFileSync(path.join(fakeBin, 'icm-shim.js'), [
+    'const a = process.argv[2] ?? "";',
+    'if (a === "recall") console.log("3 | FAKE-MEMORY-MARKER durable fact from previous session");',
+    'else if (a === "remember") console.log("stored");',
+    'else console.log("icm");'
+  ].join('\n'));
+  fs.writeFileSync(path.join(fakeBin, 'icm'), '#!/bin/sh\nexec node "$(dirname "$0")/icm-shim.js" "$@"\n');
+  fs.writeFileSync(path.join(fakeBin, 'icm.cmd'), '@echo off\r\nnode "%~dp0icm-shim.js" %*\r\n');
+  try { fs.chmodSync(path.join(fakeBin, 'icm'), 0o755); } catch {}
   const { server, port } = await mock('memory');
   fs.mkdirSync(CFG, { recursive: true });
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', memory: true }), { mode: 0o600 });

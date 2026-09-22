@@ -5,6 +5,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 export const CONFIG_DIR = process.env.INEED_CONFIG_DIR || path.join(os.homedir(), '.ineedcodes');
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -88,6 +89,16 @@ export function saveConfig(c) {
   const clean = normalize(c);
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
   try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
+  if (process.platform === 'win32') {
+    // NTFS has no POSIX mode bits, so 0600 is a no-op there. Match the Linux
+    // guarantee (only the owner can read the file with the API key) by
+    // replacing the inherited ACL with a single full-control grant for the
+    // current user. Best effort: a missing/blocked icacls must not fail a save.
+    try {
+      const user = process.env.USERNAME || process.env.USER || '';
+      if (user) spawnSync('icacls', [CONFIG_FILE, '/inheritance:r', '/grant:r', `${user}:F`], { stdio: 'ignore' });
+    } catch {}
+  }
   return clean;
 }
 

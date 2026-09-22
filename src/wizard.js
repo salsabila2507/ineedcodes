@@ -2,6 +2,7 @@
 
 import { fetchModels, chat } from './provider.js';
 import { saveConfig } from './config.js';
+import { BUILTIN } from './builtin.js';
 import { bold, dim, red, yellow, green, cyan, trunc, logo, BANNER, startSpinner } from './ui.js';
 
 export async function testConnection(cfg, signal) {
@@ -22,9 +23,21 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   console.log(dim('Any OpenAI-compatible API works: OpenAI, OmniRoute, LM Studio, Ollama, vLLM, and more.'));
   console.log('');
 
+  // beginners sometimes type session commands (/provider, /model...) into
+  // these prompts. Accepting them once saved "/provider" as a literal model id
+  // and broke every later task. Say clearly what to do instead.
+  const rejectCommand = v => {
+    if (!v.startsWith('/')) return true;
+    console.log(red('   "' + v + '" is a command for inside a session, not an answer here.'));
+    console.log(dim('   Just type the value directly (or press Enter for the suggestion).'));
+    return false;
+  };
+
   let baseUrl = '';
   while (true) {
-    baseUrl = await ask('1. API base URL (example: https://api.openai.com/v1): ');
+    // the built-in gateway is the default answer: beginners only press Enter
+    baseUrl = await ask(`1. API base URL (Enter = ${BUILTIN.baseUrl}): `);
+    if (baseUrl === '') baseUrl = BUILTIN.baseUrl;
     if (/^https?:\/\//.test(baseUrl)) break;
     abortIfEnded();
     console.log(red('   It must start with http:// or https://'));
@@ -32,11 +45,14 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
 
   let apiKey = '';
   while (apiKey === '') {
-    apiKey = await ask('2. API key (input hidden): ', { secret: true });
+    const hint = baseUrl === BUILTIN.baseUrl ? dim('  (your ineed gateway key)') : '';
+    apiKey = await ask('2. API key (input hidden): ' + hint, { secret: true });
     if (apiKey === '') {
       abortIfEnded();
       console.log(red('   API key is required. Paste it and press Enter.'));
+      continue;
     }
+    if (!rejectCommand(apiKey)) apiKey = '';
   }
 
   const probe = { baseUrl, apiKey, model: 'x' };
@@ -64,7 +80,9 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     if (model === '') {
       abortIfEnded();
       console.log(red('   Model id is required.'));
+      continue;
     }
+    if (!rejectCommand(model)) model = '';
   }
 
   console.log(dim(`   Testing ${model}...`));
@@ -86,7 +104,8 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
         apiKey = await ask('   API key: ', { secret: true });
         if (apiKey === '') abortIfEnded();
       } else if (/^m/i.test(choice)) {
-        model = await ask('   Model id: ') || model;
+        const m = await ask('   Model id: ');
+        if (m && rejectCommand(m)) model = m;
         console.log(dim(`   Testing ${model}...`));
       } else if (/^l/i.test(choice)) {
         try {
@@ -97,8 +116,10 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
           show.forEach((m, i) => console.log('   ' + (i + 1) + '. ' + m));
           const pick = await ask('   Number or full model id: ');
           if (pick === '') abortIfEnded();
-          const n = Number(pick);
-          model = Number.isInteger(n) && n >= 1 && n <= show.length ? show[n - 1] : pick;
+          if (rejectCommand(pick)) {
+            const n = Number(pick);
+            model = Number.isInteger(n) && n >= 1 && n <= show.length ? show[n - 1] : pick;
+          }
           console.log(dim(`   Testing ${model}...`));
         } catch (listErr) {
           console.log(red('   Could not list models: ' + listErr.message));

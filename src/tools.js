@@ -57,8 +57,13 @@ const SECRET_PATTERNS = [
   /\.pem$/
 ];
 
+// Windows paths carry backslashes; the patterns below are written with the
+// POSIX separator. Normalize once so .env/.ssh/.git are refused on every OS.
+const fwdSlashes = p => String(p).replace(/\\/g, '/');
+
 function isSecret(abs) {
-  return SECRET_PATTERNS.some(re => re.test(abs));
+  const p = fwdSlashes(abs);
+  return SECRET_PATTERNS.some(re => re.test(p));
 }
 
 // .git/ internals are off limits for the file tools: .git/config can carry
@@ -66,7 +71,7 @@ function isSecret(abs) {
 // execution. Everything the agent legitimately needs is covered by the
 // first-class git_* tools.
 function isGitInternal(abs) {
-  return /(^|\/)\.git(\/|$)/.test(abs);
+  return /(^|\/)\.git(\/|$)/.test(fwdSlashes(abs));
 }
 
 export const TOOLS = [

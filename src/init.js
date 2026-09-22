@@ -1,0 +1,176 @@
+// init.js: `/init` scans the current folder and writes AGENTS.md
+// (project guidance for the agent), or updates an existing one.
+// This is pure filesystem work, so it runs even when the provider is unreachable.
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
+const SRC_EXTS = ['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.rs', '.go', '.java', '.kt', '.rb', '.php', '.cs', '.cpp', '.c', '.h', '.swift', '.sh'];
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.venv', 'venv', '__pycache__', 'target', '.gradle', '.cache', 'coverage', '.idea', '.vs', '.vscode']);
+const MAX_FILES = 400;
+
+export function collect(cwd) {
+  const files = [];
+  const dirs = [];
+  let truncated = false;
+  const walk = (dir, depth) => {
+    if (depth > 4 || truncated) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (truncated) return;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        if (dir === cwd) dirs.push(e.name);
+        walk(p, depth + 1);
+      } else if (e.isFile()) {
+        if (files.length >= MAX_FILES) { truncated = true; return; }
+        files.push(path.relative(cwd, p));
+      }
+    }
+  };
+  walk(cwd, 0);
+  return { files, dirs, truncated };
+}
+
+function detect(cwd, files, dirs) {
+  const names = new Set(files.map(f => path.basename(f)));
+  const read = (rel, limit = 20000) => {
+    try { return fs.readFileSync(path.join(cwd, rel), 'utf8').slice(0, limit); } catch { return ''; }
+  };
+
+  const stack = [];
+  for (const [f, n, hint] of [
+    ['package.json', 'package.json', 'Node.js'],
+    ['requirements.txt', 'requirements.txt', 'Python (pip)'],
+    ['pyproject.toml', 'pyproject.toml', 'Python'],
+    ['go.mod', 'go.mod', 'Go'],
+    ['Cargo.toml', 'Cargo.toml', 'Rust'],
+    ['composer.json', 'composer.json', 'PHP'],
+    ['Gemfile', 'Gemfile', 'Ruby'],
+    ['pom.xml', 'pom.xml', 'Java (Maven)'],
+    ['build.gradle', 'build.gradle', 'Java/Kotlin (Gradle)'],
+  ]) if (names.has(n)) stack.push(`${hint} (has ${n})`);
+
+  const scripts = {};
+  const pkg = read('package.json');
+  if (pkg) {
+    try { Object.assign(scripts, JSON.parse(pkg).scripts ?? {}); } catch { /* corrupted json is fine */ }
+  }
+
+  const frameworks = [];
+  const add = n => { if (!frameworks.includes(n)) frameworks.push(n); };
+  if (scripts.next || names.has('next.config.js') || names.has('next.config.mjs') || names.has('next.config.ts')) add('Next.js');
+  if (scripts.nuxt || names.has('nuxt.config.ts') || names.has('nuxt.config.js')) add('Nuxt');
+  if (scripts.vite || names.has('vite.config.js') || names.has('vite.config.ts')) add('Vite');
+  if (names.has('svelte.config.js')) add('Svelte');
+  if (names.has('vue.config.js')) add('Vue');
+  if (names.has('manage.py')) add('Django');
+  if (names.has('app.py')) add('Python app (app.py)');
+  if (names.has('tailwind.config.js') || names.has('tailwind.config.ts')) add('Tailwind CSS');
+  if (names.has('Dockerfile')) add('Docker');
+  if (names.has('Makefile')) add('Make');
+  if (dirs.length) add('folders: ' + dirs.slice(0, 8).join(', '));
+
+  // forward slashes so the report looks the same on every OS
+  const tests = files.filter(f => /(^|[\\/])(test|tests|__tests__|[._-]?spec)\b|[._-]test\.|\.test\.|\.spec\./i.test(f)).map(f => f.replace(/\\/g, '/')).slice(0, 8);
+  const docs = files.filter(f => /\.(md|mdx|rst|txt)$/i.test(path.basename(f))).map(f => f.replace(/\\/g, '/')).slice(0, 8);
+  const pkgMgr = names.has('package-lock.json') ? 'npm'
+    : names.has('pnpm-lock.yaml') ? 'pnpm'
+    : names.has('yarn.lock') ? 'yarn'
+    : names.has('Cargo.lock') ? 'cargo'
+    : names.has('poetry.lock') ? 'poetry'
+    : names.has('uv.lock') ? 'uv'
+    : names.has('go.sum') ? 'go'
+    : pkg ? 'npm' : null;
+
+  return { stack, scripts, frameworks, tests, docs, pkgMgr };
+}
+
+export function buildReport(cwd) {
+  const { files, dirs, truncated } = collect(cwd);
+  const d = detect(cwd, files, dirs);
+  const extCount = {};
+  for (const f of files) {
+    const ext = path.extname(f).toLowerCase();
+    if (ext) extCount[ext] = (extCount[ext] ?? 0) + 1;
+  }
+  const top = Object.entries(extCount).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([ext, n]) => `${ext} (${n})`).join(', ');
+  const cmds = [];
+  const pkgMgr = d.pkgMgr;
+  if (pkgMgr === 'npm') {
+    for (const s of ['dev', 'test', 'build', 'lint']) if (d.scripts[s]) cmds.push(`${s}: npm run ${s}`);
+  }
+  if (pkgMgr === 'pnpm' || pkgMgr === 'yarn') {
+    for (const s of ['dev', 'test', 'build', 'lint']) if (d.scripts[s]) cmds.push(`${s}: ${pkgMgr} ${s}`);
+  }
+  if (pkgMgr === 'cargo') cmds.push('test: cargo test');
+  if (pkgMgr === 'go') cmds.push('test: go test ./...');
+
+  const lines = [
+    '# AGENTS.md',
+    '',
+    'Guidance for AI coding agents working in this folder. Generated by `ineed /init` ' + new Date().toISOString().slice(0, 10) + '.',
+    'Keep it short and project specific. Edit freely; `ineed /init` preserves manual edits.',
+    '',
+    '## Project',
+    '',
+    `- Stack: ${d.stack.length ? d.stack.join('; ') : 'not detected'}`,
+    `- Languages: ${top || 'none detected'}`,
+    `- Frameworks/tools: ${d.frameworks.length ? d.frameworks.join(', ') : 'none detected'}`,
+    pkgMgr ? `- Package manager: ${pkgMgr}` : null,
+    d.truncated ? `- Note: folder scan truncated at ${MAX_FILES} files` : null,
+    '',
+    '## Commands',
+    '',
+    ...(cmds.length ? cmds.map(c => `- ${c}`) : ['- Not detected. Add the exact commands used to run, test, and build this project.']),
+    '',
+    '## Notes for agents',
+    '',
+    d.tests.length ? `- Tests live in: ${d.tests.join(', ')}` : '- No test files detected. Add tests before changing core logic.',
+    d.docs.length ? `- Docs: ${d.docs.join(', ')}` : null,
+    '',
+    '<!-- ineed:init begin -->',
+    'Add project-specific rules below (style, gotchas, commands).',
+    '<!-- ineed:init end -->',
+  ].filter(l => l !== null);
+
+  return { text: lines.join('\n') + '\n', files: files.length };
+}
+
+// Merge new scan into existing AGENTS.md, keeping user-written notes between markers.
+export function merge(existing, fresh) {
+  const BEGIN = '<!-- ineed:init begin -->';
+  const END = '<!-- ineed:init end -->';
+  const DEFAULT_NOTES = 'Add project-specific rules below (style, gotchas, commands).';
+  const put = notes => fresh.replace(
+    /<!-- ineed:init begin -->[\s\S]*?<!-- ineed:init end -->/,
+    BEGIN + '\n' + (notes || DEFAULT_NOTES) + '\n' + END
+  );
+  const b = existing.indexOf(BEGIN);
+  const e = existing.indexOf(END);
+  if (b !== -1 && e !== -1) {
+    return put(existing.slice(b + BEGIN.length, e).replace(/^\n+|\n+$/g, ''));
+  }
+  if (b !== -1) {
+    // the end marker was edited away: everything after BEGIN is user notes,
+    // so wrap it in fresh markers instead of appending a duplicate report
+    return put(existing.slice(b + BEGIN.length).replace(/^\n+|\n+$/g, ''));
+  }
+  return existing.trimEnd() + '\n\n' + fresh.trimStart();
+}
+
+export function runInit(cwd) {
+  const target = path.join(cwd, 'AGENTS.md');
+  const existed = fs.existsSync(target);
+  const report = buildReport(cwd);
+  if (existed) {
+    const merged = merge(fs.readFileSync(target, 'utf8'), report.text);
+    fs.writeFileSync(target, merged);
+    return { wrote: target, updated: true, scanned: report.files };
+  }
+  fs.writeFileSync(target, report.text);
+  return { wrote: target, updated: false, scanned: report.files };
+}

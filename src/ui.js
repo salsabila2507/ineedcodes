@@ -1,6 +1,12 @@
 // ui.js: terminal helpers. No dependencies, respects NO_COLOR and non-TTY.
 
-export const VERSION = '1.7.17';
+import { readFileSync } from 'node:fs';
+
+// single source of truth: the version lives in package.json only, so it can
+// never drift between the binary banner and the published package again
+export const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
 
 const USE_COLOR = process.stdout.isTTY && !(process.env.NO_COLOR && process.env.NO_COLOR !== '0');
 const wrap = (code, t) => USE_COLOR ? `\x1b[${code}m${t}\x1b[0m` : String(t);
@@ -243,9 +249,12 @@ export function userBlock(text) {
 }
 
 // ── raw screen plumbing for the full-screen chat layout ──
+// enter/exit also toggle bracketed paste (?2004): terminals wrap pasted text
+// in ESC[200~ ... ESC[201~ so the app receives a paste as one atomic event
+// instead of a burst of typed lines that readline would submit one by one.
 export const screen = {
-  enter() { process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[H\x1b[2J'); },
-  exit() { process.stdout.write('\x1b[r\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1049l'); },
+  enter() { process.stdout.write('\x1b[?1049h\x1b[?2004h\x1b[?25l\x1b[H\x1b[2J'); },
+  exit() { process.stdout.write('\x1b[r\x1b[?25h\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?1049l'); },
   mouse(on) { process.stdout.write(on ? '\x1b[?1006h\x1b[?1000h' : '\x1b[?1006l\x1b[?1000l'); },
   region(top, bot) { process.stdout.write(`\x1b[${top};${bot}r`); },
   resetRegion() { process.stdout.write('\x1b[r'); },
@@ -274,6 +283,7 @@ export function makeInput(rl, onLine, onPending = null) {
   let pending = null;
   let closed = false;
   const queue = [];
+  const CANCEL = Symbol('sigint');
 
   rl.on('line', line => {
     const l = line.trim();
@@ -285,8 +295,15 @@ export function makeInput(rl, onLine, onPending = null) {
     closed = true;
     if (pending) { const r = pending; pending = null; r(''); }
   });
+  // Ctrl+C while a question is pending CANCELS that question: the ask()
+  // promise rejects with {aborted:true}. Without this the caller was left
+  // re-asking forever (the wizard trap: Ctrl+C cleared the line, every later
+  // keystroke became the answer, nothing ever exited).
+  rl.on('SIGINT', () => {
+    if (pending) { const r = pending; pending = null; r(CANCEL); }
+  });
 
-  const ask = (q, { secret = false } = {}) => new Promise(res => {
+  const ask = (q, { secret = false } = {}) => new Promise((res, rej) => {
     process.stdout.write(q + ' ');
     let prevEcho = null;
     if (secret && process.stdout.isTTY) {
@@ -299,7 +316,8 @@ export function makeInput(rl, onLine, onPending = null) {
       else if (secret) delete rl._writeToOutput;
       if (secret) process.stdout.write('\n');
       if (wasPending) { wasPending = false; onPending?.(false); }
-      res(v);
+      if (v === CANCEL) rej(Object.assign(new Error('Cancelled.'), { aborted: true }));
+      else res(v);
     };
     if (queue.length > 0) deliver(queue.shift());
     else if (closed) deliver('');

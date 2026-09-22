@@ -30,10 +30,33 @@ export async function fetchModels(cfg, signal) {
   const headers = { accept: 'application/json' };
   if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
   const res = await request(`${cfg.baseUrl}/models`, { headers }, signal);
-  if (!res.ok) throw new Error(`HTTP ${res.status} on GET /models`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} on GET /models${httpHint(res.status)}`);
   const data = await res.json();
   const ids = (data.data ?? []).map(m => m.id).filter(Boolean);
   return [...new Set(ids)];
+}
+
+// human guidance for the status codes a hosted gateway actually returns
+function httpHint(status) {
+  if (status === 401 || status === 403) return ' - key rejected or not allowed here. /setup to fix it, or /provider add to use your own provider';
+  if (status === 402) return ' - quota for this key is used up. Get a new key, or /provider add your own provider';
+  if (status === 429) return ' - rate limited: wait a moment and retry';
+  return '';
+}
+
+// the server may tell us exactly when to come back (Retry-After: seconds or
+// HTTP-date). Honoring it beats guessing a backoff; capped so a bad header
+// can never hang a task for minutes.
+const MAX_RETRY_DELAY = 60_000;
+
+function retryAfterMs(res) {
+  const h = res?.headers?.get?.('retry-after');
+  if (!h) return null;
+  const secs = Number(h);
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(MAX_RETRY_DELAY, secs * 1000);
+  const date = Date.parse(h);
+  if (!Number.isNaN(date)) return Math.max(0, Math.min(MAX_RETRY_DELAY, date - Date.now()));
+  return null;
 }
 
 export async function chat(cfg, messages, tools, signal, onDelta) {
@@ -63,7 +86,9 @@ export async function chat(cfg, messages, tools, signal, onDelta) {
       break;
     }
     if (threw || res) {
-      const delay = Math.min(15_000, 1500 * attempt * attempt);
+      // honor Retry-After when the gateway sends it, back off otherwise
+      const delay = (!threw && res?.status === 429 ? retryAfterMs(res) : null)
+        ?? Math.min(15_000, 1500 * attempt * attempt);
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -84,7 +109,7 @@ export async function chat(cfg, messages, tools, signal, onDelta) {
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       return parseMessage(await res.json());
     }
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status)}`);
   }
   if (body.stream) return readStream(res, onDelta);
   return parseMessage(await res.json());

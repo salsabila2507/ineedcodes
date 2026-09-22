@@ -54,7 +54,14 @@ if (args[0] === 'unlock') {
   } else {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ask = makeInput(rl);
-    keyword = (await ask('Developer keyword: ', { secret: true })).trim();
+    try {
+      keyword = (await ask('Developer keyword: ', { secret: true })).trim();
+    } catch {
+      rl.close();
+      console.error(yellow('Cancelled. Nothing was saved.'));
+      console.error(dim('Run ') + bold('ineed unlock') + dim(' again whenever you are ready.'));
+      process.exit(1);
+    }
     rl.close();
   }
   if (!keyword) {
@@ -208,7 +215,11 @@ if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
     try {
       cfg = await wizard(ask);
     } catch (err) {
-      if (err.aborted) { console.log(dim('\nSetup aborted. Run `ineed` to try again.')); process.exit(1); }
+      if (err.aborted) {
+        console.log(yellow('\nSetup cancelled - nothing was saved.'));
+        console.log(dim('Run ') + bold('ineed') + dim(' again whenever you are ready. This asks only once.'));
+        process.exit(1);
+      }
       throw err;
     }
     rl.close();

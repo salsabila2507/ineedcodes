@@ -17,6 +17,7 @@ import * as boost from './boost.js';
 import { spawnSync } from 'node:child_process';
 import { mcpConfigured } from './mcp.js';
 import { listSkills, findSkill, devKeyword, DEFAULT_KEYWORD } from './skills.js';
+import { runInit } from './init.js';
 
 function currentBranch(cwd) {
   const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, encoding: 'utf8' });
@@ -282,8 +283,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // keypress handler below (they arrive as keypress with key.sequence).
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let handleRef = null;
-  // Pastes land as a burst of lines and readline submits each one. Coalesce the
-  // burst into a single input so a 20-line prompt runs as one task, not twenty.
+  // Bracketed-paste terminals (most modern ones) never get here: the paste
+  // arrives as one ESC[200~ ... ESC[201~ burst and is staged atomically above.
+  // This coalescer is the fallback for terminals without the markers: pastes
+  // land as a burst of lines and readline submits each one. Coalesce the burst
+  // into a single input so a 20-line prompt runs as one task, not twenty.
   // Trailing debounce: every arriving line resets the timer, so a slow terminal
   // paste stays in one piece; ~100ms after the last line, it all flushes at once.
   // (TUI only: pipes and tests keep the exact line-by-line behavior.)
@@ -337,7 +341,21 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
   });
 
-  const say = TUI ? lines => tuiPrint(lines) : (lines => console.log(lines));
+  // plain mode: async output must not bury the half-typed input line (the
+  // classic cmd complaint: "I delete/type and can't see what I wrote"). Wipe
+  // the current visual line, print, then redraw the prompt WITH the typed
+  // buffer so what the user wrote is always visible. During a task (busy)
+  // there is no prompt to protect: print plainly, as tests and pipes expect.
+  const plainSay = lines => {
+    if (closed || rlClosed || busy || !process.stdout.isTTY) return console.log(lines);
+    // ASCII-only wipe: legacy conhost may not translate ANSI escapes, so a
+    // raw \x1b[2K would print as literal garbage there
+    const cols = Math.max(10, (process.stdout.columns || 80) - 1);
+    process.stdout.write('\r' + ' '.repeat(cols) + '\r');
+    console.log(lines);
+    try { rl._refreshLine?.(); } catch { plainPrompt(); }
+  };
+  const say = TUI ? lines => tuiPrint(lines) : lines => plainSay(lines);
 
   function doExit() {
     closed = true;
@@ -648,6 +666,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/new') + '     start a fresh session, keep the old saved');
       say('  ' + cyan('/resume') + '   list sessions, /resume <code> like 1425-0609');
       say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
+      say('  ' + cyan('/init') + '     scan this folder and write AGENTS.md for the agent');
       say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
       say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
       say('  ' + cyan('/clear') + '    forget this conversation');
@@ -702,7 +721,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     '/clear': () => { history = []; say(dim('Conversation forgotten.')); }
   };
 
+    // every dispatch path fires handle() without awaiting it, so it must never
+  // reject: a cancelled prompt (Ctrl+C) or a stray error would otherwise end
+  // as an unhandled rejection instead of a message on screen
   async function handle(input) {
+    try { return await handleInner(input); }
+    catch (err) {
+      if (closed) return;
+      if (err?.aborted) say(dim('  cancelled.'));
+      else say(red('  ✗ ' + (err?.message ?? String(err))));
+    }
+  }
+
+  async function handleInner(input) {
     if (!input) return;
     if (busy) {
       if (input === '/stop' || input.startsWith('/stop ') || input === 'stop') { activeRun?.abort(); say(dim('  (stopping...')); return; }
@@ -1142,6 +1173,20 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       busy = false;
       return afterTask();
     }
+    if (input === '/init') {
+      // explicit user command: scan this folder and write AGENTS.md. Pure
+      // filesystem work, so it runs even without a reachable provider; it is
+      // the user's own action, so plan mode (which restricts the agent) allows it.
+      busy = true;
+      try {
+        const r = runInit(process.cwd());
+        say(green(r.updated ? '  AGENTS.md updated.' : '  AGENTS.md created.')
+          + dim(`  scanned ${r.scanned} file${r.scanned === 1 ? '' : 's'} -> ${shortPath(r.wrote)}`));
+        if (TUI) drawStatus();
+      } catch (err) { say(red('  ✗ ' + err.message)); }
+      busy = false;
+      return afterTask();
+    }
     return runTask(input);
   }
 
@@ -1218,6 +1263,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     { cmd: '/memory', desc: 'memory status, /memory on|off' },
     { cmd: '/mcp', desc: 'list MCP servers and tools' },
     { cmd: '/skills', desc: 'list installed skills' },
+    { cmd: '/init', desc: 'scan this folder and write AGENTS.md' },
     { cmd: '/humanizer', desc: 'natural-writing pass on/off' },
     { cmd: '/status', desc: 'session overview' },
     { cmd: '/compact', desc: 'shrink conversation into a checkpoint' },
@@ -1352,7 +1398,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   function drawInputBox() {
     if (!composerTop) return;
     const cols = process.stdout.columns || 80;
-    const text = busy ? typedAhead : (rl.line ?? '');
+    // a staged paste wins the box in both states: it is the next message
+    const text = stagedPaste || (busy ? typedAhead : (rl.line ?? ''));
     const width = Math.max(10, cols - 7);          // rail + 2 pad + '> ' + cursor margin
     const want = composerRowsFor(text, width, cols);
     if (want !== composerRows) { composerRows = want; layout({ clear: false }); return; }
@@ -1560,6 +1607,37 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // typed-ahead input while busy: echo it inside the input box; slash menu when typing /
   let typedAhead = '';
   let wheelBuf = null;
+  // ── bracketed paste (the opencode way) ──
+  // The terminal wraps pasted text in ESC[200~ ... ESC[201~. We catch the whole
+  // burst atomically so readline never sees it as a run of typed lines, then
+  // stage it in the composer as one multi-line block. Enter submits it whole;
+  // nothing auto-runs on paste. Terminals without the markers still get the
+  // debounce coalescer in dispatchLine as a fallback.
+  let stagedPaste = '';        // full pasted block waiting for Enter
+  let pasteCapture = null;     // non-null while a paste burst is in flight
+  let pasteGuard = null;       // flush a paste whose end marker never arrived
+  const finishPaste = () => {
+    if (pasteGuard) { clearTimeout(pasteGuard); pasteGuard = null; }
+    if (!pasteCapture) return;
+    const raw = pasteCapture.text;
+    pasteCapture = null;
+    const clean = String(raw)
+      .replace(/\r\n?/g, '\n')                          // normalize newlines
+      .replace(/\x1b\[[0-9;?<>=]*[ -/]*[@-~]/g, '')     // stray CSI sequences
+      .replace(/[\x00-\x09\x0b-\x1f\x7f]/g, '')         // control chars, keep \n
+      .replace(/^\n+|\n+$/g, '');
+    if (!clean) { drawInputBox(); return; }
+    if (askPending) {
+      // a raw prompt (approval, /model, /resume...) owns the line: fill it as
+      // one line; Enter still submits, nothing runs on paste
+      origWrite(clean.replace(/\n+/g, ' '));
+      return;
+    }
+    stagedPaste = clean;
+    drawInputBox();
+    updateMenu(stagedPaste);
+    scrollRegion();
+  };
   // keypress events are emitted on the INPUT stream, not the readline interface.
   // readline also listens there and copies printable keys into its line buffer,
   // so SGR mouse fragments (digits, final M/m) leak into the prompt as stray
@@ -1570,6 +1648,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   process.stdin.on('keypress', (ch, key) => {
     if (!key) return;
     const forward = () => { for (const fn of readlineKeypress) fn.call(process.stdin, ch, key); };
+    // paste markers first: they must not reach the mouse decoder or readline
+    if (key.sequence === '\x1b[200~') {
+      pasteCapture = { text: '' };
+      pasteGuard = setTimeout(finishPaste, 3000);   // end marker lost: flush anyway
+      return;
+    }
+    if (key.sequence === '\x1b[201~') { finishPaste(); return; }
+    if (pasteCapture) {
+      // swallow the whole burst: accumulate raw text, feed nothing to readline
+      pasteCapture.text += key.name === 'return' ? '\n' : (key.sequence ?? ch ?? '');
+      return;
+    }
     // SGR mouse arrives in pieces: ESC[< then digits/; then final M/m
     if (key.sequence === '\x1b[<') { wheelBuf = ''; return; }
     if (wheelBuf !== null) {
@@ -1624,6 +1714,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       redrawChat();
       // replace whatever partial is typed: the picked command takes its place,
       // in the real readline buffer so Enter submits exactly what is shown
+      if (stagedPaste) {
+        stagedPaste = picked;
+        drawInputBox();
+        updateMenu(picked);
+        return;
+      }
       if (!busy) {
         rl.write(null, { name: 'u', ctrl: true });   // clear the line, then fill it
         rl.write(picked);
@@ -1635,17 +1731,57 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       drawInputBox();
       return;
     }
-    // Esc: closes an open menu when idle, interrupts the running task when busy
+    // Esc: drops a staged paste when one is open, closes an open menu when idle,
+    // interrupts the running task when busy
     if (key.name === 'escape' && !key.ctrl && !key.meta) {
       if (busy && activeRun) { activeRun.abort(); tuiPrint(T.muted('  (stopping...')); return; }
+      if (stagedPaste) { stagedPaste = ''; drawInputBox(); updateMenu(''); return; }
       if (menuOpen) { clearMenu(); return; }
       return; // swallow, do not insert anything into the input
     }
     if (!busy) {
+      // a staged paste waits in the composer: Enter submits it whole, editing
+      // keys work on the block, everything else is appended to it
+      if (stagedPaste) {
+        if (key.name === 'return') {
+          const text = stagedPaste;
+          stagedPaste = '';
+          if (menuOpen) clearMenu();
+          drawInputBox();
+          void handleRef?.(text);   // one input, one task
+          return;
+        }
+        if (key.ctrl && key.name === 'u') { stagedPaste = ''; drawInputBox(); updateMenu(''); return; }
+        if (key.name === 'backspace') { stagedPaste = stagedPaste.slice(0, -1); drawInputBox(); updateMenu(stagedPaste); return; }
+        if (key.ctrl || !ch || ch < ' ') { forward(); return; }
+        stagedPaste += ch;
+        drawInputBox();
+        updateMenu(stagedPaste);
+        return;
+      }
       // idle: readline owns the input; just update the box text and menu from rl.line
       if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
       forward();
       setImmediate(() => { drawInputBox(); updateMenu(rl.line ?? ''); });
+      return;
+    }
+    // busy: a staged paste is the queued message; Enter submits it whole
+    if (stagedPaste) {
+      if (key.name === 'return') {
+        const text = stagedPaste;
+        stagedPaste = '';
+        if (menuOpen) clearMenu();
+        drawInputBox();
+        void handleRef?.(text);
+        return;
+      }
+      if (key.ctrl && key.name === 'u') { stagedPaste = ''; drawInputBox(); updateMenu(''); return; }
+      if (key.name === 'backspace') { stagedPaste = stagedPaste.slice(0, -1); drawInputBox(); updateMenu(stagedPaste); scrollRegion(); return; }
+      if (key.ctrl || !ch || ch < ' ') { forward(); return; }
+      stagedPaste += ch;
+      drawInputBox();
+      updateMenu(stagedPaste);
+      scrollRegion();
       return;
     }
     if (key.name === 'backspace') typedAhead = typedAhead.slice(0, -1);

@@ -38,7 +38,8 @@ const BUILTIN = [
 ];
 
 function parseFrontmatter(raw) {
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  // normalize CRLF (Windows checkouts keep SKILL.md portable) before parsing
+  const m = String(raw).replace(/\r\n/g, '\n').match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!m) return null;
   const meta = {};
   const lines = m[1].split('\n');
