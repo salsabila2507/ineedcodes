@@ -76,6 +76,9 @@ export function normalize(c) {
     maxSteps: clampSteps(c.maxSteps),
     maxWorkers: Math.min(8, Math.max(1, Math.floor(Number(c.maxWorkers)) || 4)),
     parallelReads: Math.min(8, Math.max(1, Math.floor(Number(c.parallelReads)) || 6)),
+    // 0 = no limit. Otherwise a task stops itself once it has used this many
+    // tokens, so a runaway loop cannot quietly spend a month of quota
+    tokenBudget: Math.max(0, Math.floor(Number(c.tokenBudget) || 0)),
     models: (c.models && typeof c.models === 'object' && !Array.isArray(c.models))
       ? Object.fromEntries(Object.entries(c.models).map(([k, v]) => [k, String(v)]))
       : {},
@@ -93,6 +96,7 @@ export function loadConfig() {
   if (process.env.INEED_API_KEY) cfg.apiKey = String(process.env.INEED_API_KEY);
   if (process.env.INEED_MODEL) cfg.model = String(process.env.INEED_MODEL);
   if (process.env.INEED_MAX_STEPS != null) cfg.maxSteps = clampSteps(process.env.INEED_MAX_STEPS);
+  if (process.env.INEED_TOKEN_BUDGET) cfg.tokenBudget = Math.max(0, Math.floor(Number(process.env.INEED_TOKEN_BUDGET) || 0));
   if (!cfg.baseUrl || !cfg.model) return null;
   return cfg;
 }

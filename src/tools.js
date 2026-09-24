@@ -55,12 +55,24 @@ export const GIT_TOOL_DEFS = [
 
 const underRoot = (p, root) => p === root || p.startsWith(root + path.sep);
 
+// Anything that habitually holds a credential stays out of the model context.
+// Being wrong in the safe direction is the point: a refused read is a retry,
+// a leaked key is not undoable.
 const SECRET_PATTERNS = [
   /(^|\/)\.env($|\.)/,
   /(^|\/)\.ssh\//,
   /(^|\/)id_rsa/,
   /(^|\/)id_ed25519/,
-  /\.pem$/
+  /(^|\/)id_dsa/,
+  /(^|\/)id_ecdsa/,
+  /\.pem$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)(\.netrc|_netrc|\.pgpass|\.htpasswd)$/,
+  /(^|\/)credentials\.json$/i,
+  /(^|\/)service[-_]?account[^/]*\.json$/i,
+  /(^|\/)(secrets?|\.secrets)[^/]*\.(ya?ml|json|toml|ini)$/i,
+  /\.(p12|pfx|jks|keystore)$/i,
+  /(^|\/)[^/]*(private|secret)[^/]*\.key$/i
 ];
 
 // Windows paths carry backslashes; the patterns below are written with the
@@ -343,7 +355,7 @@ export function isDestructive(command) {
 const SHELL_MAX_OUTPUT = 200_000;   // hard cap so a runaway build cannot eat memory
 const SHELL_HARD_DEADLINE = 150_000;   // after the timeout, resolve even if a grandchild holds the pipe
 
-export function shellRun(command, cwd, signal) {
+export function shellRun(command, cwd, signal, onProgress) {
   return new Promise(resolve => {
     // detached process group: killing it takes the whole tree down, so a child
     // that ignores SIGKILL cannot keep stdout open and freeze the task
@@ -361,6 +373,7 @@ export function shellRun(command, cwd, signal) {
     const finish = () => {
       if (settled) return;
       settled = true;
+      finishWith(() => {});
       clearTimeout(timer);
       clearTimeout(hardTimer);
       signal?.removeEventListener('abort', onAbort);
@@ -376,6 +389,15 @@ export function shellRun(command, cwd, signal) {
     const hardTimer = setTimeout(() => { killTree(); finish(); }, SHELL_HARD_DEADLINE);
     const onAbort = () => { killTree(); out += '\n[stopped by user]'; };
     signal?.addEventListener('abort', onAbort, { once: true });
+    // a build that prints nothing for two minutes used to look frozen: report
+    // the newest line on a timer so the user can see the task is alive
+    const started = Date.now();
+    const progressTimer = setInterval(() => {
+      if (settled) return;
+      const lines = out.split('\n').map(l => l.trim()).filter(Boolean);
+      onProgress?.(lines[lines.length - 1] ?? '', Date.now() - started);
+    }, 2_000);
+    const finishWith = fn => { clearInterval(progressTimer); return fn(); };
     child.stdout.on('data', c => {
       out += c.toString();
       if (out.length > SHELL_MAX_OUTPUT) { truncated = true; out = out.slice(0, SHELL_MAX_OUTPUT); killTree(); }

@@ -3,6 +3,7 @@
 // Servers are configured in ~/.ineedcodes/mcp.json: { "name": { "command": "...", "args": ["..."] } }
 
 import { spawn } from 'node:child_process';
+import { markUntrusted } from './web.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -137,7 +138,9 @@ class McpServer {
     if (res.error) return { output: `Error: MCP ${this.name}/${name}: ${res.error.message}` };
     const parts = res.result?.content ?? [];
     const text = parts.filter(p => p.type === 'text').map(p => p.text).join('\n');
-    return { output: (res.result?.isError ? 'Error: ' : '') + (text || '(empty result)') };
+    // MCP servers are third-party code: their answers are quoted data too
+    return { output: (res.result?.isError ? 'Error: ' : '')
+      + markUntrusted(`MCP server ${this.name}, tool ${name}`, text || '(empty result)', 8_000) };
   }
 
   kill() {

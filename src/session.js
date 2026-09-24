@@ -184,6 +184,7 @@ const COMPACT_CHARS = 24_000;
 async function compactHistory(cfg, history, hooks = {}) {
   const size = history.reduce((n, m) => n + (m.content?.length ?? 0) + 24, 0);
   if ((!hooks.force && size < COMPACT_CHARS) || history.length < 6) return history;
+  if (hooks.signal?.aborted) return history;
   const cut = Math.floor(history.length / 2);
   const old = history.slice(0, cut);
   const rest = history.slice(cut);
@@ -275,6 +276,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     || process.env.ANSICON);
   const TUI = process.stdout.isTTY && process.stdin.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
+  const workerWork = new Map();   // worker id -> what it is doing right now
+  let lastProgressAt = 0;        // plain-mode progress throttle
+  let activeOp = null;   // in-flight /model or /compact, so Ctrl+C can cancel it
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
@@ -434,7 +438,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   async function pickModel() {
     let models = [];
-    try { models = await fetchModels(state); } catch (err) { say(red('   ' + err.message)); return; }
+    const op = new AbortController();
+    activeOp = op;
+    try { models = await fetchModels(state, op.signal); }
+    catch (err) {
+      if (op.signal.aborted) { say(T.muted('   cancelled.')); return; }
+      say(red('   ' + err.message));
+      return;
+    } finally { if (activeOp === op) activeOp = null; }
     if (models.length === 0) {
       say(yellow('   Server sent no list. Change model by editing ~/.ineedcodes/config.json'));
       return;
@@ -523,6 +534,17 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onMemoryEnd: () => stop(),
       onThinkingStart: () => { stop(); resetStream(); spinner = boxSpin('Working'); },
       onThinkingEnd: () => stop(),
+      onWorkProgress: (line, ms) => {
+        const secs = Math.round((ms ?? 0) / 1000);
+        const tail = line ? trunc(line, 60) : 'no output yet';
+        if (TUI) { startWork(`running (${secs}s) ${tail}`); return; }
+        // plain mode: one line every 10s (the timer fires on even seconds, so
+        // this must compare against the last print, not modulo)
+        if (secs - lastProgressAt >= 10) {
+          lastProgressAt = secs;
+          say(T.muted(`    still running (${secs}s): ${tail}`));
+        }
+      },
       onWorkStart: label => { stop(); spinner = boxSpin(label || 'Working'); },
       onWorkEnd: () => stop(),
       onTool: (name, input2) => {
@@ -555,7 +577,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         stop();
         say('  ' + T.tool('•') + ' ' + T.text(id) + T.muted(' ' + (input.role ?? '') + ' · ') + T.muted(trunc(String(input.objective ?? ''), 70)));
       },
+      onWorkerWork: (id, label) => {
+        // while a worker grinds, the user sees what it is doing instead of a
+        // spinner that could be the lead or any of the workers
+        if (label) workerWork.set(id, label);
+        else workerWork.delete(id);
+        if (TUI && workerWork.size) startWork([...workerWork].map(([w, l]) => `${w}: ${trunc(l, 28)}`).join(' · '));
+      },
       onAgentEnd: (id, r) => {
+        workerWork.delete(id);
         stop();
         const bad = r.status !== 'completed';
         say('  ' + (bad ? T.warning('✗') : T.success('✓')) + ' ' + T.text(id) + T.muted(` ${bad ? r.status : 'completed'} · `) + T.muted(trunc(String(r.summary ?? '').replaceAll('\n', ' '), 90)));
@@ -622,6 +652,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const stopSpinner = hooks.spinnerStop;
     startWork('Working');
     let taskSeen = 0;
+    lastProgressAt = 0;
     let retrying = false;   // the retry's own finally owns the cleanup then
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
@@ -640,10 +671,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         Object.assign(state, normalize({ ...state, lastGood: state.model }));
         try { saveConfig(state); } catch {}
       }
-      try { history = await compactHistory(state, history, { onNote: n => say(T.muted('  ◇ ' + n)) }); } catch {}
+      const cop = new AbortController(); activeOp = cop;
+      try { history = await compactHistory(state, history, { onNote: n => say(T.muted('  ◇ ' + n)), signal: cop.signal }); } catch {}
+      finally { if (activeOp === cop) activeOp = null; }
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
-        if (res.stopReason === 'step_limit') {
+        if (res.stopReason === 'budget') {
+          say(T.warning('  ■ Out of token budget') + T.muted(' - stopped before the task finished, so the bill stays bounded.'));
+        } else if (res.stopReason === 'step_limit') {
           say(T.warning('  ■ Out of steps') + T.muted(` - hit the ${res.maxSteps ?? MAX_STEPS} step limit before finishing.`));
         } else {
           say(T.warning('  ■ Stopped') + T.muted(' - you interrupted the task.'));
@@ -654,7 +689,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         if (res.ran?.length) say('  ' + T.muted(`commands run: ${res.ran.length}`) + T.muted(' (last: ') + T.text(trunc(String(res.ran[res.ran.length - 1]), 60)) + T.muted(')'));
         const doneTodos = res.todos?.filter(t => t.status === 'completed').length ?? 0;
         if (res.todos?.length) say('  ' + T.muted(`checklist: ${doneTodos}/${res.todos.length} done`));
-        const follow = res.stopReason === 'step_limit' ? ' Say "continue" to pick up where it left off.' : ' Ask me to continue when ready.';
+        const follow = ['step_limit', 'budget'].includes(res.stopReason) ? ' Say "continue" to pick up where it left off.' : ' Ask me to continue when ready.';
         say(T.muted('  ' + follow.trim()));
       } else {
         // flat summary: no card, just the result line plus the answer text
@@ -1213,10 +1248,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         say(cyan(`  ⚡ boost ${b.branch}`) + dim(` worktree at ${b.dir}`));
         const res = await runObjective(state, objective, b.dir, [], { ...hooksForRun(), skipMemory: true });
         say((res.aborted ? yellow('  ■ Stopped') : green('  ⚡ Boost task done')) + dim(` in ${b.branch}`));
-        boost.commitBoost(b.dir, 'boost: ' + objective.slice(0, 80));
+        const c = boost.commitBoost(b.dir, 'boost: ' + objective.slice(0, 80));
+        if (c && c.empty) say(T.muted('  nothing changed, no commit made'));
+        if (c && !c.ok) say(red('  boost commit failed: ' + (c.error ?? 'unknown')));
         const d = boost.boostDiff(b.dir);
         if (d.files.length) {
           say(T.muted('  ── boost changes ──'));
+          if (d.stat) say(T.muted('  ' + trunc(String(d.stat).split('\n').pop() ?? '', 100)));
           for (const f of d.files) say('  ' + T.path(f));
           const a = await ask(`   [y] merge into ${boost.currentBranch(process.cwd())} · [n] keep worktree: `);
           if (/^y/i.test(a.trim())) {
@@ -2046,6 +2084,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   rl.on('SIGINT', () => {
     if (activeRun) { activeRun.abort(); return; }
+    if (activeOp) { activeOp.abort('user'); tuiPrint(T.muted('  (cancelled')); return; }
     const now = Date.now();
     if (now - lastSigint < 3000) return doExit();
     lastSigint = now;

@@ -45,11 +45,16 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
 
   let apiKey = '';
   while (apiKey === '') {
-    const hint = baseUrl === BUILTIN.baseUrl ? dim('  (your ineed gateway key)') : '';
+    const hint = baseUrl === BUILTIN.baseUrl
+      ? dim('  (key from ineed.codes, or paste your own provider key here)')
+      : '';
     apiKey = await ask('2. API key (input hidden): ' + hint, { secret: true });
     if (apiKey === '') {
       abortIfEnded();
       console.log(red('   API key is required. Paste it and press Enter.'));
+      if (baseUrl === BUILTIN.baseUrl) {
+        console.log(dim('   No key yet? Get one at https://ineed.codes, or use your own provider (OpenAI, Ollama, LM Studio, vLLM, a router).'));
+      }
       continue;
     }
     if (!rejectCommand(apiKey)) apiKey = '';

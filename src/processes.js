@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { isDestructive } from './tools.js';
 
 const registry = new Map(); // name -> { child, logPath, command, started, exited }
 const LOG_DIR = path.join(os.tmpdir(), 'ineed-procs');
@@ -69,6 +70,11 @@ export function runProcTool(name, input, cwd = process.cwd()) {
   if (name === 'process_start') {
     const command = String(input.command ?? '').trim();
     if (!command) return { output: 'Error: empty command.' };
+    // a background process is still a command: without this check the blocked
+    // destructive list could be bypassed by running it detached
+    if (isDestructive(command)) {
+      return { output: 'Refused: that command is destructive. Run it yourself in a terminal if you are sure.' };
+    }
     if (registry.has(n) && !registry.get(n).exited) {
       return { output: `Error: "${n}" is already running (pid ${registry.get(n).child.pid}). Stop it first.` };
     }
@@ -111,8 +117,16 @@ export function runProcTool(name, input, cwd = process.cwd()) {
     const e = registry.get(n);
     if (!e) return { output: `Error: no process named "${n}".` };
     try {
-      const log = fs.readFileSync(e.logPath, 'utf8');
-      return { output: log.split('\n').slice(-40).join('\n') || '(log empty)' };
+      // read only the tail: a watcher can write a log far bigger than memory
+      const size = fs.statSync(e.logPath).size;
+      const fd = fs.openSync(e.logPath, 'r');
+      const len = Math.min(size, 64 * 1024);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      fs.closeSync(fd);
+      const text = buf.toString('utf8');
+      return { output: (text.split('\n').slice(-40).join('\n') || '(log empty)')
+        + (size > len ? `\n[showing the last ${len} bytes of ${size}]` : '') };
     } catch { return { output: '(log empty)' }; }
   }
 

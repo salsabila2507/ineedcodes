@@ -6,8 +6,15 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
-  return { ok: r.status === 0, out: ((r.stdout ?? '') + (r.stderr ?? '')).trim() };
+  // bounded and non-interactive: a hook, a pager or a lock must not hang a boost
+  const r = spawnSync('git', args, {
+    cwd, encoding: 'utf8', timeout: 60_000,
+    env: { ...process.env, GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
+  });
+  const out = ((r.stdout ?? '') + (r.stderr ?? '')).trim();
+  if (r.error?.code === 'ETIMEDOUT') return { ok: false, out: 'git timed out after 60s' };
+  if (r.error) return { ok: false, out: 'git failed: ' + r.error.message };
+  return { ok: r.status === 0, out };
 }
 
 export function boostAvailable(cwd) {
@@ -31,8 +38,11 @@ export function startBoost(cwd) {
 
 export function commitBoost(dir, message) {
   git(['add', '-A'], dir);
-  const r = git(['commit', '-m', message, '--allow-empty'], dir);
-  return r.ok;
+  // no empty commit: if the task changed nothing, there is nothing to reconcile
+  const pending = git(['diff', '--cached', '--name-only'], dir);
+  if (!pending.out) return { ok: true, empty: true };
+  const r = git(['commit', '-m', message], dir);
+  return { ok: r.ok, error: r.out };
 }
 
 export function boostDiff(dir) {

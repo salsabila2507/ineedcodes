@@ -236,12 +236,20 @@ if (args[0] === '--child') {
       return makeInput(rl)(q);
     };
     let interrupted = null;
+    let lastProgressAt = 0;
     process.on('SIGINT', () => { if (interrupted) process.exit(interrupted); interrupted = 2; console.log('\n' + yellow('Stopping...') + dim(' (report below)')); });
     const res = await runObjective(cfg, task, process.cwd(), [], {
       onTodos: list => {
         const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
         console.log(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
       },
+      onWorkProgress: (line, ms) => {
+        const secs = Math.round((ms ?? 0) / 1000);
+        if (secs - lastProgressAt < 10) return;
+        lastProgressAt = secs;
+        console.log(dim(`    still running (${secs}s): ${(line || 'no output yet').slice(0, 60)}`));
+      },
+      onWorkStart: label => console.log(dim('  ' + label)),
       onResult: (out, name) => {
         if (process.env.INEED_QUIET) return;
         const first = String(out ?? '').split('\n')[0].slice(0, 90);

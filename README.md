@@ -133,6 +133,36 @@ ineed provider add local
 ineed tolerates servers that answer with a stream even when streaming was not
 requested, or a JSON body with stream trailers attached.
 
+## Settings
+
+Everything lives in `~/.ineedcodes/config.json`. The guided menus (`/config`, `/status`,
+`/provider`, `/model`) cover all of it; the table is for when you want to set something once.
+
+| key | default | what it does |
+|---|---|---|
+| `provider` | `default` | which saved provider is active |
+| `model` | from setup | model id sent to the provider |
+| `maxSteps` | `100` | how many model rounds one task may take (5-200) |
+| `tokenBudget` | `0` (off) | stop a task after this many tokens, so a runaway loop cannot spend your quota silently |
+| `maxWorkers` | `4` | read-only sub-agents that may run at the same time (max 8) |
+| `parallelReads` | `6` | read-only tool calls that may run at the same time (max 8) |
+| `permEdit` | `ask` | `ask` before editing files, `allow` to stop asking |
+| `permShell` | `ask` | `ask` before running commands, `allow` to stop asking |
+| `permNet` | `allow` | `ask` before fetching web pages or using MCP tools |
+| `humanize` | `true` | run the copy pass on written html/md/txt (adds a model call per file) |
+| `memory` | `true` | remember durable facts between sessions |
+| `mcp` | `true` | load configured MCP servers and their tools |
+| `reasoning` | `low` | `high` thinks longer, costs more |
+| `explain` | `normal` | `short`, `normal`, `deep` answer length |
+| `mode` | `build` | `plan` is read-only |
+| `models` | `{}` | per-role model ids for sub-agents, e.g. `{"research": "gpt-4o-mini"}` |
+| `searchUrl` | none | search endpoint template with `{query}` for `web_search` |
+| `tui` | auto | force the full-screen interface on or off |
+| `theme` | `dark` | `light`, `mono`, `nord`, `dracula`, `synthwave` |
+
+Environment variables win over the file: `INEED_BASE_URL`, `INEED_API_KEY`, `INEED_MODEL`,
+`INEED_MAX_STEPS`, `INEED_TOKEN_BUDGET`. Useful for CI or a one-off run with no config at all.
+
 ## How it works
 
 ```
