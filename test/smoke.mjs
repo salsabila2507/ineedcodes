@@ -30,6 +30,7 @@ const check = (name, ok, detail = '') => {
 };
 
 function mock(script) {
+  let ratelimitHit = false;
   const reply = content => ({ choices: [{ message: { role: 'assistant', content } }] });
   const call = (name, args) => ({
     choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'c' + Math.random().toString(36).slice(2), type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }]
@@ -38,7 +39,7 @@ function mock(script) {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', () => {
-      const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      const send = (code, obj, headers = {}) => { res.writeHead(code, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(obj)); };
       if (req.url.endsWith('/models')) {
         if (script === 'nomodels') return send(200, { data: [] });
         return send(200, { data: [{ id: 'mock-mini' }, { id: 'mock-pro' }, { id: 'gpt-4o-mini' }] });
@@ -46,6 +47,10 @@ function mock(script) {
       if (!req.url.endsWith('/chat/completions')) return send(404, { error: 'nope' });
       const auth = req.headers.authorization ?? '';
       if (auth !== 'Bearer ' + SECRET) return send(401, { error: { message: 'bad key' } });
+      if (script === 'ratelimit') {
+        if (!ratelimitHit) { ratelimitHit = true; return send(429, { error: { message: 'slow down' } }, { 'retry-after': '1' }); }
+        return send(200, { choices: [{ message: { role: 'assistant', content: 'RATE-OK' } }] });
+      }
       // some routers append stream leftovers to an otherwise normal JSON body
       if (script === 'ssejson') {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -115,6 +120,16 @@ function mock(script) {
           else resp = reply('ran echo EVIDENCE-12345 and saw it in output');
           break;
         case 'loop': resp = call('noop', {}); break;
+        case 'paste': {
+          // proof that a pasted block arrives as ONE objective: both lines have
+          // to sit in the same user message, or this never replies
+          const userText = msgs.filter(m => m.role === 'user').map(m => String(m.content ?? '')).join('\n');
+          const oneTask = userText.includes('paste-line-one') && userText.includes('paste-line-two');
+          if (hadTools) resp = oneTask ? reply('PASTE-ONE-TASK') : reply('PASTE-SPLIT-INTO-TWO');
+          else if (oneTask) resp = call('write_file', { path: 'pasted.txt', content: 'line one\nline two\n' });
+          else resp = reply('PASTE-SPLIT-INTO-TWO');
+          break;
+        }
         case 'workerasks': {
           const isWorker = String(msgs[0]?.content ?? '').includes('worker) spawned by the lead agent');
           if (isWorker) resp = hadTools ? reply('worker done') : call('write_file', { path: 'w.txt', content: 'x' });
@@ -345,7 +360,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.9.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.9.1'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('--reset') && out.includes('-h') && out.includes('tanpa slash'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -514,7 +529,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.9.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.9.1'), out);
   server.close();
 }
 
@@ -1008,6 +1023,47 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const { server, port } = await mock('ssejson');
   const { code, out } = await oneShot('ssejson', 'say hi', { baseUrl: `http://127.0.0.1:${port}/v1` });
   check('provider: JSON body with a stream trailer is parsed', code === 0 && out.includes('MIXED-OK'), out.slice(-300));
+  server.close();
+}
+
+// ── real terminal: bracketed paste is staged, not run (needs a pty) ──
+if (process.platform !== 'win32' && spawnSync('script', ['--version']).status === 0) {
+  const ttySession = (input, waitMs = 5000) => new Promise(resolve => {
+    // util-linux `script` allocates a pty, so the TUI path runs for real
+    const child = spawn('script', ['-qec', `${process.execPath} ${JSON.stringify(CLI)}`, '/dev/null'], {
+      cwd: TMP,
+      env: { ...process.env, INEED_CONFIG_DIR: CFG, TERM: 'xterm-256color', INEED_NO_MEMORY: '1' }
+    });
+    let out = '';
+    child.stdout.on('data', c => out += c);
+    child.stderr.on('data', c => out += c);
+    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, waitMs + 8000);
+    child.stdin.write(input);
+    setTimeout(() => { try { child.stdin.write('/exit\n'); } catch {} }, waitMs);
+    child.on('close', code => { clearTimeout(killer); resolve({ code, out }); });
+  });
+
+  const { server, port } = await mock('paste');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', permEdit: 'allow'
+  }), { mode: 0o600 });
+  // bracketed paste: the two lines must land as one staged block that runs on
+  // Enter, never as two tasks and never automatically
+  const paste = await ttySession('\u001b[200~paste-line-one\npaste-line-two\u001b[201~\n', 5000);
+  const pasted = path.join(TMP, 'pasted.txt');
+  check('tty: a bracketed paste runs as one task after Enter, not two',
+    paste.out.includes('PASTE-ONE-TASK') && !paste.out.includes('PASTE-SPLIT-INTO-TWO')
+    && fs.existsSync(pasted) && fs.readFileSync(pasted, 'utf8').includes('line two'),
+    paste.out.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').slice(-400));
+  server.close();
+}
+
+// ── rate limiting is visible, not a silent hang ──
+{
+  const { server, port } = await mock('ratelimit');
+  const { code, out } = await oneShot('ratelimit', 'hi', { baseUrl: `http://127.0.0.1:${port}/v1` });
+  check('retry: a 429 wait is announced and the task still finishes', code === 0 && out.includes('RATE-OK') && /retry 2\//.test(out), out.slice(-300));
   server.close();
 }
 

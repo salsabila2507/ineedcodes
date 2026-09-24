@@ -278,6 +278,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let sessionId = null;
   let lastBoost = null;
   let usage = { input: 0, output: 0 };
+  // cost visibility: people cannot budget what they cannot see. Tokens are
+  // counted per task and for the whole session (price depends on the provider)
+  let sessionTokens = 0;
+  let taskTokens = 0;
+  const kfmt = n => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
   var tuiReady = false;
   let spinnerFrame = null;   // current frame of the live working-line spinner
   let spinnerText = null;    // label shown on the live working line
@@ -567,7 +572,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           }
           say(T.muted('  ◇ ' + note));
         },
-        onUsage: u => { usage = u; if (TUI) drawStatus(); },
+        onUsage: u => {
+        usage = u;
+        taskTokens = (u.input || 0) + (u.output || 0);
+        sessionTokens += Math.max(0, taskTokens - taskSeen);
+        taskSeen = taskTokens;
+        if (TUI) drawStatus();
+      },
         drainSteer: () => steerQueue.splice(0),
       onSteer: list => { for (const s of list) say(T.warning('  ↳ steer: ') + T.text(s)); },
       onApprove: async (cat, name, input2) => {
@@ -610,6 +621,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
     startWork('Working');
+    let taskSeen = 0;
     let retrying = false;   // the retry's own finally owns the cleanup then
     try {
       const res = await runObjective(state, input, process.cwd(), history, hooks);
@@ -646,7 +658,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         say(T.muted('  ' + follow.trim()));
       } else {
         // flat summary: no card, just the result line plus the answer text
-        say('  ' + T.success('✓ Done') + (res.changed?.length ? T.muted('  files: ' + res.changed.join(', ')) : ''));
+        const tIn = res.usage?.input ?? 0;
+        const tOut = res.usage?.output ?? 0;
+        say('  ' + T.success('✓ Done')
+          + (res.changed?.length ? T.muted('  files: ' + res.changed.join(', ')) : '')
+          + (tIn + tOut ? T.muted('  ' + kfmt(tIn + tOut) + ' tokens') : ''));
         // compare stripped text and use includes(): wrapLines repaints in place,
         // so byte equality is too brittle. Only in TUI, where streaming actually
         // painted something; in plain mode the answer must always be printed
@@ -1121,9 +1137,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         + T.muted('  change: /reason'));
       say('  ' + T.muted('mcp       ') + T.text(mcpConfigured() ? 'extra tools active' : 'no extra tools'));
       const spent = (usage.input || 0) + (usage.output || 0);
-      say('  ' + T.muted('usage     ') + T.text(spent
-        ? usage.input + ' tokens in / ' + usage.output + ' tokens out'
-        : '0 tokens (nothing used in this session yet)'));
+      say('  ' + T.muted('tokens    ') + T.text(spent
+        ? usage.input + ' in / ' + usage.output + ' out  (this session ' + kfmt(sessionTokens) + ')'
+        : '0 so far in this session'));
+      say(T.muted('  price depends on your provider; /status shows the raw counts'));
       say('  ' + T.muted('session   ') + T.text(sessionId ?? 'not saved yet'));
       say('  ' + T.muted('folder    ') + T.path(shortPath(process.cwd())));
       say(T.muted('  change model: /model   change provider: /provider   all commands: /help'));
@@ -1868,6 +1885,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // here and never reach readline; every other key is forwarded unchanged.
   const readlineKeypress = process.stdin.listeners('keypress');
   process.stdin.removeAllListeners('keypress');
+  // a real terminal sends \r for Enter ("return"); a pipe or a script harness
+  // sends \n ("enter"). Both must submit, or pasted blocks cannot be sent.
+  const ENTER = key => key?.name === 'return' || key?.name === 'enter';
   process.stdin.on('keypress', (ch, key) => {
     if (!key) return;
     const forward = () => { for (const fn of readlineKeypress) fn.call(process.stdin, ch, key); };
@@ -1880,7 +1900,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (key.sequence === '\x1b[201~') { finishPaste(); return; }
     if (pasteCapture) {
       // swallow the whole burst: accumulate raw text, feed nothing to readline
-      pasteCapture.text += key.name === 'return' ? '\n' : (key.sequence ?? ch ?? '');
+      pasteCapture.text += ENTER(key) ? '\n' : (key.sequence ?? ch ?? '');
       return;
     }
     // SGR mouse arrives in pieces: ESC[< then digits/; then final M/m
@@ -1966,7 +1986,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       // a staged paste waits in the composer: Enter submits it whole, editing
       // keys work on the block, everything else is appended to it
       if (stagedPaste) {
-        if (key.name === 'return') {
+        if (ENTER(key)) {
           const text = stagedPaste;
           stagedPaste = '';
           if (menuOpen) clearMenu();
@@ -1983,14 +2003,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         return;
       }
       // idle: readline owns the input; just update the box text and menu from rl.line
-      if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
+      if (ENTER(key)) { typedAhead = ''; if (menuOpen) clearMenu(); }
       forward();
       setImmediate(() => { drawInputBox(); updateMenu(rl.line ?? ''); });
       return;
     }
     // busy: a staged paste is the queued message; Enter submits it whole
     if (stagedPaste) {
-      if (key.name === 'return') {
+      if (ENTER(key)) {
         const text = stagedPaste;
         stagedPaste = '';
         if (menuOpen) clearMenu();
@@ -2008,7 +2028,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return;
     }
     if (key.name === 'backspace') typedAhead = typedAhead.slice(0, -1);
-    else if (key.name === 'return') { typedAhead = ''; if (menuOpen) clearMenu(); }
+    else if (ENTER(key)) { typedAhead = ''; if (menuOpen) clearMenu(); }
     else if (key.ctrl || !ch || ch < ' ') { forward(); return; }
     else typedAhead += ch;
     drawInputBox();
