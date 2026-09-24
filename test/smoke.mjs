@@ -46,6 +46,21 @@ function mock(script) {
       if (!req.url.endsWith('/chat/completions')) return send(404, { error: 'nope' });
       const auth = req.headers.authorization ?? '';
       if (auth !== 'Bearer ' + SECRET) return send(401, { error: { message: 'bad key' } });
+      // some routers append stream leftovers to an otherwise normal JSON body
+      if (script === 'ssejson') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'MIXED-OK' } }] }) + 'data: [DONE]\n\n');
+        return;
+      }
+      // some routers stream even when stream was not asked for
+      if (script === 'sse') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { role: 'assistant' } }] }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'SSE-' } }] }) + '\n\n');
+        res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: 'OK' } }] }) + '\n\n');
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
       const parsed = JSON.parse(body || '{}');
       const msgs = parsed.messages ?? [];
       const toolResults = msgs.filter(m => m.role === 'tool').map(m => String(m.content ?? ''));
@@ -320,8 +335,8 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.8.0'), out); }
-{ const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('one-shot task') && out.includes('--reset'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.8.1'), out); }
+{ const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('--reset') && out.includes('-h') && out.includes('tanpa slash'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
 fs.rmSync(CFG, { recursive: true, force: true });
@@ -489,7 +504,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.8.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.8.1'), out);
   server.close();
 }
 
@@ -811,7 +826,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   fs.mkdirSync(CFG, { recursive: true });
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
   const { code, out } = await run([], { input: '/status\n/depth short\n/depth\n/exit\n' });
-  check('session: /status shows tokens/perms/model', out.includes('Status') && out.includes('tokens') && out.includes('edit:ask'), out.slice(-400));
+  check('session: /status shows config in plain language', out.includes('Current status') && out.includes('token') && out.includes('allow') && out.includes('asks first'), out.slice(-400));
   check('session: /depth short|deep', out.includes('Explanation depth: short') && out.includes('results only'), out.slice(-300));
   server.close();
 }
@@ -909,6 +924,103 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const rm = await run(['provider', 'remove', 'beta']);
   const after = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
   check('provider: remove drops one profile', rm.code === 0 && !after.providers.beta && !!after.providers.alpha, JSON.stringify(after).slice(0, 200));
+}
+
+// ── provider switch pulls the live model list (stale saved model gets fixed) ──
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: {
+      lama: { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'model-yang-sudah-hilang' },
+      hidup: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'model-yang-sudah-hilang' }
+    },
+    provider: 'lama'
+  }, null, 2), { mode: 0o600 });
+
+  const sw = await run(['provider', 'use', 'hidup']);
+  const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('provider: switch repairs a model the provider no longer has',
+    sw.code === 0 && saved.model === 'gpt-4o-mini' && saved.providers.hidup.model === 'gpt-4o-mini'
+    && sw.out.includes('old model is not in that catalog'), (sw.out + JSON.stringify(saved)).slice(0, 400));
+
+  // numbered pick inside a session, still pulling the live list
+  const sess = await run([], { input: '/provider\n/provider 1\n/exit\n' });
+  check('session: /provider <number> switches by number', sess.code === 0
+    && sess.out.includes('Provider: ') && sess.out.includes('fetching the model list'), sess.out.slice(-500));
+
+  // the same word without a slash must run the command, not a paid model call
+  const plain = await run([], { input: 'provider\n/exit\n' });
+  check('session: "provider" without slash opens the provider menu',
+    plain.out.includes('providers') && !plain.out.includes('Done'), plain.out.slice(-300));
+
+  // old profile with an unreachable server still switches, with a warning
+  const warn = await run(['provider', 'use', 'lama']);
+  const stillOld = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('provider: unreachable server keeps the saved model and warns',
+    warn.code === 0 && stillOld.model === 'model-yang-sudah-hilang' && warn.out.includes('Could not fetch the model list'), (warn.out + JSON.stringify(stillOld)).slice(0, 400));
+  server.close();
+}
+
+// ── beginner settings menu: numbered, plain language, no memorising flags ──
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const menu = await run([], { input: '/config\n5\n1\n/config\nexit\n' });
+  check('session: /config is a numbered menu and changes a setting',
+    menu.code === 0 && menu.out.includes('settings') && menu.out.includes('May it change files?')
+    && menu.out.includes('answers: short'), menu.out.slice(-600));
+  server.close();
+}
+
+// ── plain words as commands: no slash needed ──
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const out = await run([], { input: 'help\nstatus\n/exit\n' });
+  check('session: "help" and "status" work without a slash',
+    out.code === 0 && out.out.includes('Current status') && out.out.includes('/help'), out.out.slice(-400));
+  server.close();
+}
+
+// ── a provider that streams even when asked not to must still work ──
+{
+  const { server, port } = await mock('sse');
+  const { code, out } = await oneShot('sse', 'say hi', { baseUrl: `http://127.0.0.1:${port}/v1` });
+  check('provider: SSE-only router is parsed instead of crashing', code === 0 && out.includes('SSE-OK'), out.slice(-300));
+  const wiz = await run(['provider', 'add', 'sseprov'], { input: `http://127.0.0.1:${port}/v1\n${SECRET}\nmock-mini\n` });
+  check('wizard: SSE-only provider passes the connection test', wiz.code === 0 && wiz.out.includes('Works'), wiz.out.slice(-400));
+  server.close();
+}
+{
+  const { server, port } = await mock('ssejson');
+  const { code, out } = await oneShot('ssejson', 'say hi', { baseUrl: `http://127.0.0.1:${port}/v1` });
+  check('provider: JSON body with a stream trailer is parsed', code === 0 && out.includes('MIXED-OK'), out.slice(-300));
+  server.close();
+}
+
+// ── a mistyped flag never becomes a paid task ──
+{
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm' }), { mode: 0o600 });
+  const bad = await run(['--wat']);
+  check('cli: unknown --flag is refused with guidance, not run as a task',
+    bad.code === 1 && bad.out.includes('Unknown option') && bad.out.includes('drop the dashes'), bad.out);
+  const keep = await run(['--reset'], { input: 'n\n' });
+  const after = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('cli: --reset asks before wiping providers and keys',
+    keep.code === 0 && after.model === 'm' && keep.out.includes('Cancelled'), keep.out.slice(-300));
+}
+
+// ── a failed command must not look successful ──
+{
+  const { fmtResultLine } = await import('../src/session.js');
+  const failed = fmtResultLine('shell', 'exit code: 1\nnpm ERR! boom');
+  const passed = fmtResultLine('shell', 'exit code: 0\nall good');
+  check('display: nonzero exit shows a cross, zero shows a tick',
+    failed.includes('✗') && !failed.includes('✓') && passed.includes('✓'), failed + ' | ' + passed);
 }
 
 // ── env overrides: no config file at all (headless / CI / quick switch) ──

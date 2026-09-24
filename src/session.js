@@ -6,7 +6,8 @@
 import * as readline from 'node:readline';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { clearConfig, normalize, saveConfig, addProvider, setActiveProvider, removeProvider, providerNames } from './config.js';
+import { clearConfig, normalize, saveConfig, addProvider, removeProvider, providerNames } from './config.js';
+import { switchProviderLive } from './switch.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
 import { fetchModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
@@ -138,12 +139,17 @@ function fmtToolLine(name, input) {
 
 // real result right below the call that produced it: `✓ exit 0` plus indented
 // stdout/stderr for commands, or a one-line summary for every other tool.
-function fmtResultLine(toolName, out) {
+export function fmtResultLine(toolName, out) {
   const s = String(out ?? '').replace(/\s+$/, '');
   const cols = process.stdout.columns || 80;
   const w = Math.max(20, cols - 8);
   const bad = /^(Error|Refused|Denied)/i.test(s.trim());
-  const mark = bad ? T.error('✗') : T.success('✓');
+  // a command that failed is a failure, whatever the text says: nonzero exit,
+  // a timeout, a killed process, or no exit code at all
+  const firstLine = s.split('\n')[0] ?? '';
+  const exitCode = /^exit code:\s*(.+)$/.exec(firstLine)?.[1]?.trim() ?? '';
+  const exitBad = Boolean(exitCode) && exitCode !== '0';
+  const mark = bad || exitBad ? T.error('✗') : T.success('✓');
   if (toolName === 'shell' || toolName === 'process_output') {
     const rows = s.split('\n');
     const head = rows.shift() ?? '';
@@ -283,6 +289,35 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // keypress handler below (they arrive as keypress with key.sequence).
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let handleRef = null;
+  // Piped input arrives in one burst, so a slow command could still be running
+  // when the next line shows up (/exit especially). Every line joins one FIFO:
+  // a pending question takes it first, the session loop takes the rest, one at
+  // a time. Nothing is dropped and nothing overtakes anything.
+  let pumpingHeld = false;
+  let eofPending = false;
+  const pumpHeld = () => {
+    if (ask.busy() || ask.held()) return;   // a question owns the next line
+    const line = ask.peek();
+    if (line == null) {
+      if (eofPending && !busy) doExit();
+      return;
+    }
+    if (!handleRef) { setTimeout(pumpHeld, 30); return; }
+    // while a task runs, a held line is a live steer and must not wait for it
+    if (busy) {
+      ask.take();
+      void handleRef(line);
+      pumpHeld();
+      return;
+    }
+    if (pumpingHeld) return;
+    ask.take();
+    pumpingHeld = true;
+    void (async () => {
+      try { await handleRef(line); } catch {}
+      finally { pumpingHeld = false; pumpHeld(); }
+    })();
+  };
   // Bracketed-paste terminals (most modern ones) never get here: the paste
   // arrives as one ESC[200~ ... ESC[201~ burst and is staged atomically above.
   // This coalescer is the fallback for terminals without the markers: pastes
@@ -329,11 +364,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   let rlClosed = false;   // set when readline has closed (EOF) but a task still runs
   // Paste coalescing works on any real terminal (Windows consoles included).
   // Pipes and tests keep the exact line-by-line behavior.
-  const ask = makeInput(rl, process.stdout.isTTY ? dispatchLine : (l => handleRef?.(l)), p => { askPending = p; });
+  const ask = makeInput(rl, process.stdout.isTTY ? dispatchLine : (l => { ask.hold(l); pumpHeld(); }), p => { askPending = p; if (!p) pumpHeld(); });
   if (TUI) rl._writeToOutput = s => { if (askPending) process.stdout.write(s); };
   // EOF (Ctrl+D or closed pipe): exit cleanly, unless a task is still running
   rl.on('close', () => {
     rlClosed = true;
+    if (ask.peek() != null || pumpingHeld || ask.busy()) {  // piped lines still waiting
+      eofPending = true;
+      pumpHeld();
+      return;
+    }
     if (!busy) doExit();
     else {
       const wait = setInterval(() => { if (!busy) { clearInterval(wait); doExit(); } }, 200);
@@ -676,17 +716,95 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(dim('  while a task runs: your text is a live steer, /stop cancels it'));
       say('  ' + cyan('/exit') + '     quit');
     },
-    '/config': () => {
-      say(T.muted('  ── provider config ──'));
-      say('  ' + T.muted('provider') + '   ' + T.text(state.provider || '(none)'));
-      say('  ' + T.muted('base URL') + '   ' + T.text(state.baseUrl));
-      say('  ' + T.muted('model') + '      ' + T.text(state.model));
-      say('  ' + T.muted('reasoning') + '  ' + T.text(state.reasoning));
-      say('  ' + T.muted('mode') + '        ' + T.text(mode));
-      say('  ' + T.muted('memory') + '      ' + T.text(state.memory === false ? 'off' : 'on (icm)'));
-      say('  ' + T.muted('edit perm') + '   ' + T.text(state.permEdit));
-      say('  ' + T.muted('shell perm') + '  ' + T.text(state.permShell));
-      say('  ' + T.muted('API key') + '     ' + T.muted('saved, hidden'));
+    // one guided menu instead of a wall of toggles: six things a beginner
+    // actually cares about, each a numbered choice in plain language
+    '/config': async arg => {
+      const yn = v => v ? T.success('on') : T.muted('off');
+      const askMode = v => v === 'allow' ? T.success('always allowed') : T.text('asks first');
+      const rows = [
+        ['1. May it change files?', askMode(state.permEdit), '/perm'],
+        ['2. May it run commands?', askMode(state.permShell), '/perm'],
+        ['3. May it use the internet?', state.permNet === 'ask' ? T.text('asks first') : T.success('always allowed'), '/perm'],
+        ['4. Work mode', mode === 'plan' ? T.text('plan (read only)') : T.text('build (can change files)'), '/plan /build'],
+        ['5. Answer length', T.text({ short: 'short', normal: 'normal', deep: 'detailed' }[state.explain] ?? state.explain), '/depth'],
+        ['6. Remember past sessions?', yn(state.memory !== false), '/memory']
+      ];
+      const pickOne = async (question, options) => {
+        say(T.muted('   ' + question));
+        options.forEach((o, i) => say('   ' + (i + 1) + '. ' + o.label + (o.current ? T.muted('  (current)') : '')));
+        const a = (await ask('   pick a number (Enter to cancel): ')).trim();
+        if (!a) return null;
+        const n = Number(a);
+        if (!Number.isInteger(n) || n < 1 || n > options.length) { say(red('   pick 1-' + options.length + '.')); return null; }
+        return options[n - 1].value;
+      };
+      if (arg) {
+        // old style still works: /config show, and the raw values stay visible
+        const names = rows.map(r => r[2]);
+        if (names.includes(arg.trim())) { say(T.muted('  use: ' + arg.trim())); }
+      }
+      say(T.muted('  ── settings ──'));
+      for (const [label, value, cmd] of rows) say('  ' + label.padEnd(30) + value + T.muted('   (' + cmd + ')'));
+      say('  ' + T.muted('provider  ') + T.text(state.provider || '(none)') + T.muted('   ' + state.baseUrl));
+      say('  ' + T.muted('model     ') + T.text(state.model));
+      say('  ' + T.muted('API key   ') + T.muted('saved, hidden'));
+      const arg2 = arg?.trim();
+      if (!arg2) {
+        const n = (await ask('  change what? (number, Enter to quit): ')).trim();
+        if (!n) return;
+        const num = Number(n);
+        if (num === 1 || num === 2 || num === 3) {
+          const key = num === 1 ? 'permEdit' : num === 2 ? 'permShell' : 'permNet';
+          const v = await pickOne('Permission to ' + ['change files', 'run commands', 'use the internet'][num - 1] + '?', [
+            { label: 'always allowed (works without asking)', value: 'allow' },
+            { label: 'ask me every time (safest)', value: 'ask' }
+          ]);
+          if (!v) return;
+          Object.assign(state, normalize({ ...state, [key]: v }));
+          try { saveConfig(state); } catch {}
+          say(green('  now: ') + T.text(v === 'allow' ? 'always allowed' : 'asks first'));
+          if (TUI) drawStatus();
+          return;
+        }
+        if (num === 4) {
+          const v = await pickOne('May the agent change files?', [
+            { label: 'yes (build)', value: 'build' },
+            { label: 'read only first (plan)', value: 'plan' }
+          ]);
+          if (!v) return;
+          mode = v;
+          Object.assign(state, normalize({ ...state, mode }));
+          say(green('  mode: ') + T.text(v === 'plan' ? 'plan (read only)' : 'build (can change files)'));
+          if (TUI) drawStatus();
+          return;
+        }
+        if (num === 5) {
+          const v = await pickOne('How long should answers be?', [
+            { label: 'short (results only)', value: 'short' },
+            { label: 'normal', value: 'normal' },
+            { label: 'detailed (with explanations)', value: 'deep' }
+          ]);
+          if (!v) return;
+          Object.assign(state, normalize({ ...state, explain: v }));
+          try { saveConfig(state); } catch {}
+          say(green('  answers: ') + T.text(v));
+          if (TUI) drawStatus();
+          return;
+        }
+        if (num === 6) {
+          const v = await pickOne('Remember work from past sessions?', [
+            { label: 'on', value: true },
+            { label: 'off', value: false }
+          ]);
+          if (v == null) return;
+          Object.assign(state, normalize({ ...state, memory: v }));
+          try { saveConfig(state); } catch {}
+          say(green('  memory: ') + T.text(v ? 'on' : 'off'));
+          if (TUI) drawStatus();
+          return;
+        }
+        say(red('  pick 1-6, or Enter to quit.'));
+      }
     },
     '/theme': async arg => {
       const apply = v => {
@@ -738,6 +856,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (busy) {
       if (input === '/stop' || input.startsWith('/stop ') || input === 'stop') { activeRun?.abort(); say(dim('  (stopping...')); return; }
       if (input.startsWith('/')) { pendingLines.push(input); return; }
+      // a plain word like "provider" or "status" is a command, not a steer
+      const asCommand = shortcutCommand(input);
+      if (asCommand) { pendingLines.push(asCommand); say(T.muted('  (queued: ' + asCommand + ' runs when the task stops)')); return; }
       steerQueue.push(input);
       // interrupt the in-flight provider call so the steer applies immediately
       if (activeRun) activeRun.abort('steer');
@@ -747,7 +868,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
     if (input === '/help' || input === '?') return commands['/help']();
     if (input === '/theme' || input.startsWith('/theme ')) { busy = true; try { await commands['/theme'](input.slice(6).trim()); } finally { busy = false; } return afterTask(); }
-    if (input === '/config' || input === '/config show') { busy = true; try { commands['/config'](); } finally { busy = false; } return afterTask(); }
+    if (input === '/config' || input === '/config show') { busy = true; try { await commands['/config'](''); } finally { busy = false; } return afterTask(); }
     if (input.startsWith('/config ')) {
       // /config <setting> <value>: change one setting and save
       const parts = input.slice(8).trim().split(/\s+/);
@@ -813,29 +934,52 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (input === '/provider' || input.startsWith('/provider ')) {
       const arg = input.slice(9).trim();
       const names = providerNames(state);
+      const switchTo = async name => {
+        const pick = /^\d+$/.test(name) ? names[Number(name) - 1] : name;
+        if (!pick || !state.providers[pick]) {
+          say(red(`  No provider named ${name || '(empty)'}.`) + T.muted('  choices: ' + (names.join(', ') || '(none yet)')));
+          return;
+        }
+        busy = true;
+        say(T.muted('   fetching the model list from ' + state.providers[pick].baseUrl + '...'));
+        try {
+          const r = await switchProviderLive(state, pick, { signal: activeRun?.signal });
+          if (!r.ok) { say(red('  ' + r.error)); return; }
+          Object.assign(state, normalize(r.cfg));
+          say(green('  Provider: ' + state.provider) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
+          if (r.modelChanged) say(T.muted('   old model is not in that catalog, now using: ') + T.text(r.model));
+          if (r.fetchError) {
+            say(yellow('   Could not fetch the model list: ' + r.fetchError));
+            say(T.muted('   try again: /provider ' + state.provider));
+          } else if (r.models.length > 1) {
+            say(T.muted('   want another model? type: /model'));
+          }
+        } catch (err) {
+          say(red('  Could not switch provider: ' + (err.message ?? err)));
+        } finally {
+          busy = false;
+          if (TUI) drawStatus();
+        }
+      };
       if (!arg) {
         say(T.muted('  ── providers ──'));
-        if (!names.length) say(yellow('  no providers saved') + T.muted('  · add: /provider add'));
-        for (const n of names) {
+        if (!names.length) say(yellow('  no providers saved') + T.muted('  · add one: /provider add'));
+        names.forEach((n, i) => {
           const p = state.providers[n];
-          say('  ' + (n === state.provider ? T.success('* ') : '  ') + T.text(n)
+          say('  ' + (n === state.provider ? T.success('* ') : '  ') + T.muted(String(i + 1) + '. ') + T.text(n)
             + T.muted('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
-        }
-        say(T.muted('  switch: /provider <name> · add: /provider add · remove: /provider remove <name>'));
+        });
+        say(T.muted('  pick: /provider <number>  · add: /provider add  · remove: /provider remove <name>'));
         return;
       }
       const parts = arg.split(/\s+/);
       const head = parts[0].toLowerCase();
-      const switchTo = name => {
-        const next = setActiveProvider(state, name);
-        if (!next) { say(red(`  No provider named ${name}.`)); return; }
-        Object.assign(state, normalize(next));
-        say(green('  Provider: ' + state.provider) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
-        if (TUI) drawStatus();
-      };
-      if (head === 'use') { switchTo(parts[1] ?? ''); return; }
+      if (head === 'use') { await switchTo(parts[1] ?? ''); return; }
       if (head === 'remove') {
         if (!parts[1]) { say(T.muted('  usage: /provider remove <name>')); return; }
+        if (!state.providers[parts[1]]) { say(red(`  No provider named ${parts[1]}.`)); return; }
+        const ok = (await ask(`   remove provider "${parts[1]}" and its key? [y/N] `)).trim().toLowerCase();
+        if (ok !== 'y' && ok !== 'yes') { say(T.muted('   cancelled.')); return; }
         const next = removeProvider(state, parts[1]);
         if (!next) { say(red(`  No provider named ${parts[1]}.`)); return; }
         Object.assign(state, normalize(next));
@@ -859,7 +1003,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         busy = false;
         return afterTask();
       }
-      switchTo(arg);   // bare name switches
+      await switchTo(arg);   // bare name or number switches
       return;
     }
     if (input === '/model') { busy = true; try { await pickModel(); } finally { busy = false; } return afterTask(); }
@@ -918,17 +1062,34 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return afterTask();
     }
     if (input === '/status') {
-      say(T.muted('  ── Status ──'));
-      say('  ' + T.muted('model') + '      ' + T.text(state.model));
-      say('  ' + T.muted('provider') + '   ' + T.text(state.provider || '(none)'));
-      say('  ' + T.muted('mode') + '       ' + T.text(mode) + T.muted(' / reasoning ' + state.reasoning + ' / depth ' + state.explain));
-      say('  ' + T.muted('perms') + '       ' + T.text('edit:' + state.permEdit + ' shell:' + state.permShell + ' net:' + state.permNet));
-      say('  ' + T.muted('memory') + '      ' + T.text(state.memory === false ? 'off' : 'on (icm)'));
-      say('  ' + T.muted('humanizer') + '   ' + T.text(state.humanize === false ? 'off' : 'on'));
-      say('  ' + T.muted('mcp') + '        ' + T.text(mcpConfigured() ? 'configured' : 'not configured'));
-      say('  ' + T.muted('tokens') + '      ' + T.text(usage.input || usage.output ? usage.input + ' in / ' + usage.output + ' out' : '-'));
-      say('  ' + T.muted('session') + '     ' + T.text(sessionId ?? 'not saved yet'));
-      say('  ' + T.muted('cwd') + '        ' + T.path(shortPath(process.cwd())));
+      const onOff = v => v === false ? T.muted('off') : T.success('on');
+      const askState = v => v === 'allow' ? T.success('always allowed') : T.text('asks first');
+      say(T.muted('  ── Current status ──'));
+      say('  ' + T.muted('model     ') + T.text(state.model) + T.muted('  at ' + (state.provider || 'default provider')));
+      say('  ' + T.muted('address   ') + T.text(state.baseUrl));
+      say('  ' + T.muted('mode      ') + (mode === 'plan'
+        ? T.text('plan') + T.muted(' (read only, changes nothing)')
+        : T.text('build') + T.muted(' (may change files)')) + T.muted('  change: /build or /plan'));
+      say('  ' + T.muted('allow     ') + T.muted('edit files ') + askState(state.permEdit)
+        + T.muted(' · run commands ') + askState(state.permShell)
+        + T.muted(' · use internet ') + (state.permNet === 'ask' ? T.text('asks first') : T.success('always allowed'))
+        + T.muted('  change: /perm auto'));
+      say('  ' + T.muted('memory    ') + onOff(state.memory) + T.muted(' (notes from earlier sessions)')
+        + T.muted('  change: /memory'));
+      say('  ' + T.muted('humanizer ') + onOff(state.humanize) + T.muted(' (natural wording in html/md)')
+        + T.muted('  change: /humanizer'));
+      say('  ' + T.muted('detail    ') + T.text(state.explain) + T.muted(' (how long answers are)')
+        + T.muted('  change: /depth'));
+      say('  ' + T.muted('thinking  ') + T.text(state.reasoning === 'high' ? 'deeper (slower, costs more)' : 'normal')
+        + T.muted('  change: /reason'));
+      say('  ' + T.muted('mcp       ') + T.text(mcpConfigured() ? 'extra tools active' : 'no extra tools'));
+      const spent = (usage.input || 0) + (usage.output || 0);
+      say('  ' + T.muted('usage     ') + T.text(spent
+        ? usage.input + ' tokens in / ' + usage.output + ' tokens out'
+        : '0 tokens (nothing used in this session yet)'));
+      say('  ' + T.muted('session   ') + T.text(sessionId ?? 'not saved yet'));
+      say('  ' + T.muted('folder    ') + T.path(shortPath(process.cwd())));
+      say(T.muted('  change model: /model   change provider: /provider   all commands: /help'));
       return;
     }
     if (input === '/compact') {
@@ -1040,7 +1201,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           say(T.muted('  instructions:'));
           for (const l of s.instructions.slice(0, 1_500).split('\n').slice(0, 40)) say('  ' + T.text(l));
           say(T.muted('Say "use ' + s.name + ' to ..." and the agent follows them.'));
-          if (s.gated) say(T.warning('  ⚠ gunakan dengan bijak: hanya untuk target yang kamu miliki izinnya.'));
+          if (s.gated) say(T.warning('  ⚠ use responsibly: only on targets you are authorized to test.'));
         }
         else say(red(`No skill named ${argClean}.`));
         return;
@@ -1056,9 +1217,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
       if (gated > 0) {
         say(dim(`  (+${gated} gated security skills aktif)`));
-        say(T.warning('  ⚠ gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
+        say(T.warning('  ⚠ use responsibly: only on systems you are authorized to test.'));
       } else {
-        say(dim(`  security skills gak ada atau terkunci. jalankan ${bold('ineed skills-sync')} untuk mengunduhnya dari repo, aktifkan di task dengan ${bold('"take me to jungle"')}`));
+        say(dim(`  security skills are missing or locked. Run ${bold('ineed skills-sync')} to download them from the repo, then activate them in a task with ${bold('"take me to jungle"')}`));
       }
       return;
     }
@@ -1187,7 +1348,31 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       busy = false;
       return afterTask();
     }
+    // beginner shortcut: the common words work without the slash, so nobody has
+    // to memorize /provider or /model before their first task
+    const shortcut = shortcutCommand(input);
+    if (shortcut) return handle(shortcut);
     return runTask(input);
+  }
+
+  // exact single words (plus one argument for provider/model) map to commands;
+  // anything longer stays a real task, because "plan my week" is not a command
+  function shortcutCommand(text) {
+    const parts = String(text).trim().split(/\s+/);
+    const word = parts[0].toLowerCase();
+    const rest = parts.slice(1).join(' ');
+    const one = {
+      help: '/help', '?': '/help', help2: '/help',
+      status: '/status', model: '/model', provider: '/provider',
+      memory: '/memory', humanizer: '/humanizer', perm: '/perm', permission: '/perm', izin: '/perm',
+      plan: '/plan', build: '/build', depth: '/depth', reason: '/reason',
+      theme: '/theme', skills: '/skills', init: '/init', compact: '/compact',
+      new: '/new', clear: '/clear', reset: '/reset', setup: '/setup',
+      exit: '/exit', quit: '/exit', stop: '/stop', mcp: '/mcp', boost: '/boost'
+    };
+    if (one[word] && !rest) return one[word];
+    if ((word === 'provider' || word === 'model') && rest) return '/' + word + ' ' + rest;
+    return null;
   }
 
   const plainPrompt = () => {
@@ -1227,6 +1412,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       rl.prompt();
     });
     handleRef = handle;
+    pumpHeld();
     // big ANSI-shadow logo wraps on narrow terminals (Windows default 120 is fine,
     // but small windows and split panes are not): fall back to the one-line banner
     const cols = process.stdout.columns || 80;
@@ -1811,6 +1997,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   });
 
   handleRef = handle;
+  pumpHeld();
 
   screen.enter();
   screen.mouse(true);

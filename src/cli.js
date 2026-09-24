@@ -8,16 +8,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 const [MAJOR] = process.versions.node.split('.').map(Number);
-if (!(MAJOR >= 20)) {
-  console.error(`ineed needs Node.js 20 or newer. You have ${process.versions.node}.`);
-  console.error('Install a newer Node from https://nodejs.org and try again.');
-  process.exit(1);
-}
+const args = process.argv.slice(2);
 
 const { loadConfig } = await import('./config.js');
 const { VERSION, bold, dim, red, green, yellow, cyan, box } = await import('./ui.js');
-
-const args = process.argv.slice(2);
 
 if (args[0] === '--version' || args[0] === '-v') {
   console.log(`ineed ${VERSION}`);
@@ -28,17 +22,27 @@ if (args[0] === '--help' || args[0] === '-h') {
   console.log(`
 ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
 
-  ${green('ineed')}                        interactive session (first open: setup)
-  ${green('ineed "fix the build errors"')}  one-shot task
-  ${green('ineed provider')}               list/switch/add API providers
-  ${green('ineed unlock')}                 set a custom developer keyword (default: "take me to jungle")
-  ${green('ineed skills-sync')}            download the gated security skills (opt-in)
-  ${green('ineed --reset')}                 redo provider setup
-  ${green('ineed --version')}               show version
+  ${green('ineed')}                        ${dim('open a session, then just talk to it')}
+  ${green('ineed "bikin halaman login"')}  ${dim('do one task, then exit')}
 
-Inside a session, ${dim('/help')} lists the shortcuts. Or just talk to it.
+  ${bold('Setup')}
+  ${green('ineed provider')}              ${dim('pick a provider by number, switch API/key, add providers')}
+  ${green('ineed --reset')}               ${dim('HAPUS semua provider+key, lalu setup ulang')}
+
+  ${bold('Lainnya')}
+  ${green('ineed --help, -h')}            ${dim('t bantuan ini')}
+  ${green('ineed --version, -v')}         ${dim('t versi')}
+
+  ${dim('Di dalam sesi: /help buat daftar perintah.')}
+  ${dim('Mengetik "provider" atau "help" tanpa slash juga jalan.')}
 `);
   process.exit(0);
+}
+
+if (!(MAJOR >= 20)) {
+  console.error(`ineed needs Node.js 20 or newer. You have ${process.versions.node}.`);
+  console.error('Install a newer Node from https://nodejs.org and try again.');
+  process.exit(1);
 }
 
 // unlock: store the developer keyword locally so gated security skills activate here
@@ -74,7 +78,7 @@ if (args[0] === 'unlock') {
   console.log(green('Gated skills unlocked on this machine.'));
   console.log(dim('Saved to ' + keywordFile + ' (0600). Use them by mentioning the keyword in a task, e.g. /skills or "use the sqli skill".'));
   console.log(dim('(No unlock needed by default: saying "take me to jungle" in a task activates them. A custom keyword overrides the phrase.)'));
-  console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
+  console.log(yellow('Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
 }
 
@@ -90,17 +94,22 @@ if (args[0] === 'skills-sync') {
   }
   console.log(green(`Synced ${r.copied} skill(s) to ${r.dest}.`));
   console.log(dim('Activate them in a task by saying "take me to jungle", or set a custom keyword with ineed unlock.'));
-  console.log(yellow('Gunakan dengan bijak: hanya untuk sistem yang kamu miliki izin untuk menguji.'));
+  console.log(yellow('Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
 }
 
-// provider: manage saved providers (any OpenAI-compatible API). Switch with
-// `ineed provider use <name>`, add with `ineed provider add <name>`.
+// provider: manage saved providers (any OpenAI-compatible API). Bare
+// `ineed provider` is a numbered menu for beginners; `use <name>` also repairs
+// the model by pulling the live list from the provider that was picked.
 if (args[0] === 'provider') {
-  const { normalize, addProvider, setActiveProvider, removeProvider, providerNames } = await import('./config.js');
+  const { normalize, addProvider, removeProvider, providerNames } = await import('./config.js');
+  const { switchProviderLive } = await import('./switch.js');
   const cfg = loadConfig() ?? normalize({});
   const names = providerNames(cfg);
   const sub = (args[1] ?? '').trim();
+  // `switchName` is set by the numbered menu, so the flow below never depends on
+  // rewriting args (the subcommand was already resolved above)
+  let switchName = null;
 
   if (!sub || sub === 'list') {
     if (!names.length) {
@@ -109,20 +118,45 @@ if (args[0] === 'provider') {
       process.exit(0);
     }
     console.log(bold('Providers'));
-    for (const n of names) {
+    names.forEach((n, i) => {
       const p = cfg.providers[n];
-      console.log('  ' + (n === cfg.provider ? green('*') : ' ') + ' ' + bold(n)
+      console.log('  ' + (n === cfg.provider ? green('*') : ' ') + ' ' + dim(String(i + 1) + '. ') + bold(n)
         + dim('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
+    });
+    // interactive only on a real terminal, so scripts and pipes keep working
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const readline0 = await import('node:readline');
+      const { makeInput } = await import('./ui.js');
+      const rl0 = readline0.createInterface({ input: process.stdin, output: process.stdout });
+      const ask0 = makeInput(rl0);
+      const answer = (await ask0('\nPick a provider (number or name, Enter to quit): ')).trim();
+      rl0.close();
+      if (!answer) process.exit(0);
+      const pick = /^\d+$/.test(answer) ? names[Number(answer) - 1] : answer;
+      if (!pick || !cfg.providers[pick]) {
+        console.error(red('No such provider.') + dim('  choices: ' + names.join(', ')));
+        process.exit(1);
+      }
+      switchName = pick;
+    } else {
+      console.log(dim('\n  switch: ineed provider use <name>   add: ineed provider add <name>   remove: ineed provider remove <name>'));
+      process.exit(0);
     }
-    console.log(dim('\n  switch: ineed provider use <name>   add: ineed provider add <name>   remove: ineed provider remove <name>'));
-    process.exit(0);
   }
 
-  if (sub === 'use') {
-    const name = (args[2] ?? '').trim();
-    const next = setActiveProvider(cfg, name);
-    if (!next) { console.error(red('No provider named ' + (name || '(empty)') + '.')); process.exit(1); }
-    console.log(green('Provider: ' + next.provider) + dim('  ' + next.baseUrl + '  model: ' + next.model));
+  if (sub === 'use' || switchName) {
+    const raw = switchName ?? (args[2] ?? '').trim();
+    const name = /^\d+$/.test(raw) ? names[Number(raw) - 1] : raw;
+    const r = await switchProviderLive(cfg, name ?? '');
+    if (!r.ok) { console.error(red(r.error)); process.exit(1); }
+    console.log(green('Provider: ' + r.cfg.provider) + dim('  ' + r.cfg.baseUrl + '  model: ' + r.cfg.model));
+    if (r.modelChanged) {
+      console.log(dim('  old model is not in that catalog, now using: ') + r.model);
+    }
+    if (r.fetchError) {
+      console.log(yellow('  Could not fetch the model list: ' + r.fetchError));
+      console.log(dim('  try again: ineed provider use ' + r.cfg.provider));
+    }
     process.exit(0);
   }
 
@@ -192,7 +226,15 @@ if (args[0] === '--child') {
 // one-shot task: keep this process alive as the parent, run the worker as a child.
 // --reset/--resume/-r are interactive flags and must not be treated as an objective.
 if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
+  // a mistyped flag must never turn into a paid task with a strange objective
+  if (args[0].startsWith('-')) {
+    console.error(red('Unknown option: ' + args[0]));
+    console.error(dim('  available: --help, --version, --reset, --resume'));
+    console.error(dim('  to run a task, drop the dashes: ineed "create hello.txt"'));
+    process.exit(1);
+  }
   const { fileURLToPath } = await import('node:url');
+  console.log(dim('Working... (Ctrl+C to stop)'));
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', ...args], { stdio: 'inherit' });
   child.on('exit', code => process.exit(code ?? 1));
 } else {
@@ -203,6 +245,18 @@ if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
   const { clearConfig } = await import('./config.js');
 
   if (args[0] === '--reset') {
+    // this wipes every saved provider and API key, so ask first
+    const { CONFIG_FILE } = await import('./config.js');
+    if (fs.existsSync(CONFIG_FILE)) {
+      const rl0 = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ask0 = makeInput(rl0);
+      const a = (await ask0('\nERASE every saved provider and API key? [y/N] ')).trim().toLowerCase();
+      rl0.close();
+      if (a !== 'y' && a !== 'yes') {
+        console.log(dim('Cancelled. Nothing was deleted.'));
+        process.exit(0);
+      }
+    }
     clearConfig();
     console.log(dim('Setup cleared. Let\'s set it up again.'));
   }

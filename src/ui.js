@@ -284,10 +284,28 @@ export function makeInput(rl, onLine, onPending = null) {
   let closed = false;
   const queue = [];
   const CANCEL = Symbol('sigint');
+  // Right after a line is delivered, the code that asked for it resumes in a
+  // microtask, while readline emits the next buffered line synchronously. A
+  // pasted or piped burst would therefore feed question 2 with question 3's
+  // answer. Holding lines for one tick lets the next ask() claim its own.
+  let held = false;
+  const releaseHold = () => {
+    if (!held) return;
+    held = false;
+    onPending?.(false);
+  };
 
   rl.on('line', line => {
     const l = line.trim();
-    if (pending) { const r = pending; pending = null; r(l); return; }
+    if (pending) {
+      const r = pending;
+      pending = null;
+      r(l);
+      held = true;
+      setImmediate(releaseHold);
+      return;
+    }
+    if (held) { queue.push(l); return; }
     if (onLine) { onLine(l); return; }
     queue.push(l);
   });
@@ -329,5 +347,24 @@ export function makeInput(rl, onLine, onPending = null) {
     if (pending) { const r = pending; pending = null; r(l); return; }
     queue.push(l);
   };
+  // piped input: every line joins one FIFO. A pending question takes the next
+  // line; whatever is left is read by the session loop, so a pasted or piped
+  // burst of command lines can never overtake a slow command.
+  ask.hold = l => {
+    if (pending) {
+      const r = pending;
+      pending = null;
+      r(l);
+      held = true;
+      setImmediate(releaseHold);
+      return true;
+    }
+    queue.push(l);
+    return false;
+  };
+  ask.busy = () => Boolean(pending);
+  ask.held = () => held;
+  ask.peek = () => (queue.length ? queue[0] : null);
+  ask.take = () => (queue.length ? queue.shift() : null);
   return ask;
 }

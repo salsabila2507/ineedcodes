@@ -38,9 +38,11 @@ export async function fetchModels(cfg, signal) {
 
 // human guidance for the status codes a hosted gateway actually returns
 function httpHint(status) {
-  if (status === 401 || status === 403) return ' - key rejected or not allowed here. /setup to fix it, or /provider add to use your own provider';
-  if (status === 402) return ' - quota for this key is used up. Get a new key, or /provider add your own provider';
-  if (status === 429) return ' - rate limited: wait a moment and retry';
+  if (status === 401 || status === 403) return ' - API key rejected or not allowed here. Replace it: /provider add <name>, or check your key.';
+  if (status === 402) return ' - this key is out of credit. Top up in the provider dashboard, or use another provider: /provider';
+  if (status === 404) return ' - API address not found. Check the base URL, it usually ends with /v1. See: /config';
+  if (status === 429) return ' - too many requests. Wait a moment and try again.';
+  if (status >= 500) return ' - the provider is having trouble. Try again in a little while.';
   return '';
 }
 
@@ -57,6 +59,16 @@ function retryAfterMs(res) {
   const date = Date.parse(h);
   if (!Number.isNaN(date)) return Math.max(0, Math.min(MAX_RETRY_DELAY, date - Date.now()));
   return null;
+}
+
+// a 400 that names the model is almost always a stale model id after a provider
+// switch, so say the one action that fixes it
+function modelHint(status, text) {
+  if (!/model/i.test(String(text))) return '';
+  if (status === 404 || status === 400 || status === 422) {
+    return ' - this model does not exist at that provider. Switch: /provider (the list is pulled again), or /model';
+  }
+  return '';
 }
 
 export async function chat(cfg, messages, tools, signal, onDelta) {
@@ -99,20 +111,26 @@ export async function chat(cfg, messages, tools, signal, onDelta) {
       delete body.reasoning_effort;
       delete body.stream;
       const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
-      if (!retry.ok) throw new Error(`HTTP ${retry.status}: ${(await retry.text()).slice(0, 200)}`);
-      return parseMessage(await retry.json());
+      if (!retry.ok) {
+        const t = (await retry.text()).slice(0, 200);
+        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status)}${modelHint(retry.status, t)}`);
+      }
+      return parseMessage(await readCompletion(retry));
     }
     // provider does not stream: fall back to a plain call instead of failing
     if (body.stream && (res.status === 400 || res.status === 404 || res.status === 422)) {
       delete body.stream;
       res = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-      return parseMessage(await res.json());
+      if (!res.ok) {
+        const t = (await res.text()).slice(0, 200);
+        throw new Error(`HTTP ${res.status}: ${t}${httpHint(res.status)}${modelHint(res.status, t)}`);
+      }
+      return parseMessage(await readCompletion(res));
     }
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status)}`);
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status)}${modelHint(res.status, text)}`);
   }
   if (body.stream) return readStream(res, onDelta);
-  return parseMessage(await res.json());
+  return parseMessage(await readCompletion(res));
 }
 
 // SSE stream: accumulate content and tool_calls, emit text deltas as they arrive.
@@ -180,6 +198,74 @@ async function readStream(res, onDelta) {
   const msg = { role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
   if (usage) msg._usage = { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 };
   return msg;
+}
+
+// Several OpenAI-compatible routers (local proxies, gateways) answer with an SSE
+// body even when stream was not requested. JSON.parse then dies with
+// "Unexpected non-whitespace character after JSON", which looks like a broken
+// key. Read the body as text and rebuild the message from the chunks instead.
+// first complete JSON value in the text, respecting strings and escapes
+function firstJsonObject(text) {
+  const start = text.search(/[[{]/);
+  if (start < 0) return null;
+  const open = text[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+async function readCompletion(res) {
+  const raw = await res.text();
+  // Some routers append stream leftovers to a normal JSON body, with or without
+  // a newline ("...}{\n\ndata: [DONE]" or "...}data: [DONE]"), and others stream
+  // the whole reply even when stream was not requested. Take the first complete
+  // JSON value; if there is none, assemble the answer from the SSE chunks.
+  const trailer = raw.search(/data:|event:/);
+  if (trailer > 0) {
+    const head = raw.slice(0, trailer).trim();
+    try { return JSON.parse(head); } catch {}
+    const obj = firstJsonObject(head);
+    if (obj) { try { return JSON.parse(obj); } catch {} }
+  }
+  if (trailer === -1) return JSON.parse(raw);
+  let content = '';
+  let role = 'assistant';
+  const toolCalls = new Map();
+  let usage = null;
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    const at = t.indexOf('data:');
+    if (at < 0) continue;
+    const payload = t.slice(at + 5).trim();
+    if (!payload || payload === '[DONE]') continue;
+    let j;
+    try { j = JSON.parse(payload); } catch { continue; }
+    if (j.usage) usage = j.usage;
+    const d = j.choices?.[0]?.delta ?? {};
+    if (d.role) role = d.role;
+    if (d.content) content += d.content;
+    for (const tc of d.tool_calls ?? []) toolCalls.set(tc.index ?? toolCalls.size, { ...(toolCalls.get(tc.index) ?? {}), ...tc });
+  }
+  const message = { role, content };
+  if (toolCalls.size) message.tool_calls = [...toolCalls.values()];
+  return { choices: [{ message }], usage };
 }
 
 function parseMessage(json) {

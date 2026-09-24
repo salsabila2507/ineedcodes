@@ -203,7 +203,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       : `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skillsFull}`;
   // developer mode (jungle keyword present) has no extra hoops: a named gated
   // skill activates on mention alone; the builtin humanizer still wants an ask
-  if (skills.some(s => s.gated)) hooks.onNote?.('developer mode aktif - gunakan dengan bijak, hanya untuk target yang kamu miliki izinnya');
+  if (skills.some(s => s.gated)) hooks.onNote?.('developer mode on - use responsibly, only on targets you are authorized to test');
   const invokedSkill = !extra.worker
     ? skills.find(s => s.name
       && new RegExp(`\\b${s.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(objective)

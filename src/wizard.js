@@ -58,13 +58,21 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   const probe = { baseUrl, apiKey, model: 'x' };
   console.log(dim('\n   Checking connection...'));
   let models = [];
+  let connErr = '';
   const connSpin = startSpinner('connecting');
   try {
     models = await fetchModels(probe);
-  } catch {}
+  } catch (err) {
+    connErr = String(err.message ?? err);
+  }
   connSpin.stop();
   if (models.length > 0) {
     console.log(green(`   Connected. ${models.length} models available.`));
+  } else if (connErr) {
+    // say what actually failed: a beginner must not be told "Connected" and
+    // then hit an invisible wall three questions later
+    console.log(yellow('   Could not reach the model list: ' + connErr));
+    console.log(dim('   You can still continue: step 3 lets you type a model id by hand.'));
   } else {
     console.log(yellow('   Connected, but the server did not return a model list (many routers hide it).'));
   }
