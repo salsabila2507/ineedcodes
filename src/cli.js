@@ -237,7 +237,18 @@ if (args[0] === '--child') {
     };
     let interrupted = null;
     let lastProgressAt = 0;
-    process.on('SIGINT', () => { if (interrupted) process.exit(interrupted); interrupted = 2; console.log('\n' + yellow('Stopping...') + dim(' (report below)')); });
+    let runCtl = null;   // Ctrl+C has to reach the running task, not just the print
+    let sigints = 0;
+    process.on('SIGINT', () => {
+      sigints++;
+      // the terminal sends one, the parent forwards another: only the third is
+      // a real "I do not care about the report", the second must still print it
+      if (sigints >= 3) { console.log(''); process.exit(2); }
+      if (interrupted) return;
+      interrupted = 2;
+      if (runCtl) { try { runCtl.abort('user'); } catch {} }
+      console.log('\n' + yellow('Stopping...') + dim(' (report below)'));
+    });
     const res = await runObjective(cfg, task, process.cwd(), [], {
       onTodos: list => {
         const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
@@ -256,6 +267,8 @@ if (args[0] === '--child') {
         if (first) console.log(dim('  · ' + name + ': ' + first));
       },
       onNote: n => console.log(dim('  ' + n)),
+      onRunStart: c => { runCtl = c; },
+      onRunEnd: () => { runCtl = null; },
       approved,
       onApprove: async (cat, name, input) => {
         if (!canAsk) return true;

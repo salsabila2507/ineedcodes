@@ -123,6 +123,7 @@ function mock(script) {
           else resp = reply('ran echo EVIDENCE-12345 and saw it in output');
           break;
         case 'loop': resp = call('noop', {}); break;
+        case 'nostream': resp = hadTools ? reply('NOSTREAM-OK') : call('list_files', {}); break;
         case 'burner': {
           res.writeHead(200, { 'content-type': 'application/json' });
           return res.end(JSON.stringify({
@@ -1134,6 +1135,18 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
   const { code, out, work } = await oneShot('parwrite', 'write then read', { permEdit: 'allow' });
   check('ordering: a write and a read in one message still run in order',
     code === 0 && out.includes('SEQ-OK') && fs.readFileSync(path.join(work, 'seq.txt'), 'utf8') === 'written-first', out.slice(-300));
+  server.close();
+}
+
+// ── a provider that ignores stream:true must still be usable ──
+{
+  // found by hard testing: with "stream": true and a provider that answers with
+  // one plain JSON body, the stream reader saw no data: lines and the task ended
+  // reporting success with an empty answer
+  const { server, port } = await mock('nostream');
+  const { code, out } = await oneShot('nostream', 'read the folder', { stream: true });
+  check('provider: stream:true with a plain JSON reply still runs the task',
+    code === 0 && out.includes('NOSTREAM-OK'), out.slice(-300));
   server.close();
 }
 

@@ -244,8 +244,22 @@ async function readStream(res, onDelta) {
   // returned as if it were a complete message. "(timed out)" puts it in the
   // retryable class the session's recovery prompt already understands
   if (stalled) throw new Error('stream stalled: no data for 90s (timed out)');
+  // Some providers ignore stream:true and answer with one plain JSON body. The
+  // stream reader then sees no data: lines and would report an empty answer,
+  // which used to look like a finished task with no output. Parse it instead.
+  if (!content && !toolCalls.length && !usage && buffer.trim().startsWith('{')) {
+    try {
+      return parseMessage(JSON.parse(buffer));
+    } catch (err) {
+      if (err && /unusable reply/.test(String(err.message))) throw err;
+    }
+  }
   const msg = { role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
   if (usage) msg._usage = { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 };
+  // a stream that produced neither text nor a tool call is not a usable answer
+  if (!content && !toolCalls.length) {
+    throw new Error('Provider sent an unusable reply (the stream carried no message). Try /model, or turn streaming off with "stream": false in the config.');
+  }
   return msg;
 }
 
