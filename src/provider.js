@@ -70,14 +70,70 @@ async function request(url, opts, signal) {
   }
 }
 
+// A gateway can sit in front of several upstream providers and list them as
+// "provider/model". With modelAlias set, the user sees one namespace instead
+// ("ineed/model"), and the real id goes back on the wire when the request is
+// sent. Providers without modelAlias are listed exactly as they send themselves.
+const aliasCache = new Map();
+
+export function buildModelAlias(ids, alias) {
+  const map = new Map();
+  const list = [];
+  for (const id of ids) {
+    const slash = id.indexOf('/');
+    const prefix = slash > 0 ? id.slice(0, slash) : '';
+    const name = slash > 0 ? id.slice(slash + 1) : id;
+    const shown = prefix && alias ? `${alias}/${name}` : id;
+    const kept = map.get(shown);
+    if (kept !== undefined) {
+      // two upstreams share this name: the gateway's own namespace wins
+      if (prefix !== alias && kept.startsWith(`${alias}/`)) continue;
+      map.set(shown, id);
+      continue;
+    }
+    map.set(shown, id);
+    list.push(shown);
+  }
+  return { list, map };
+}
+
+function realModelId(cfg) {
+  const want = String(cfg.model ?? '');
+  return aliasCache.get(cfg.baseUrl)?.get(want) ?? want;
+}
+
+// A one-shot run never lists models, so the map would be empty and the shown
+// name would go out as-is. Fetch the list once, lazily, when the configured
+// model looks like an alias. A failure here just sends the name unchanged.
+const aliasWarm = new Map();
+async function warmAlias(cfg, signal) {
+  const alias = String(cfg.modelAlias ?? '').trim();
+  if (!alias) return;
+  if (aliasCache.has(cfg.baseUrl)) return;
+  if (!String(cfg.model ?? '').startsWith(`${alias}/`)) return;
+  if (!aliasWarm.has(cfg.baseUrl)) {
+    aliasWarm.set(cfg.baseUrl, (async () => {
+      try { await fetchModels({ ...cfg, model: '' }, signal); } catch {}
+    })().finally(() => aliasWarm.delete(cfg.baseUrl)));
+  }
+  await aliasWarm.get(cfg.baseUrl);
+}
+
 export async function fetchModels(cfg, signal) {
   const headers = { accept: 'application/json' };
   if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
   const res = await request(`${cfg.baseUrl}/models`, { headers }, signal);
   if (!res.ok) throw new Error(`HTTP ${res.status} on GET /models${httpHint(res.status)}`);
   const data = await res.json();
-  const ids = (data.data ?? []).map(m => m.id).filter(Boolean);
-  return [...new Set(ids)];
+  const ids = [...new Set((data.data ?? []).map(m => m.id).filter(Boolean))];
+  const alias = String(cfg.modelAlias ?? '').trim();
+  if (!alias) {
+    aliasCache.delete(cfg.baseUrl);
+    return ids;
+  }
+  const { list, map } = buildModelAlias(ids, alias);
+  aliasCache.set(cfg.baseUrl, map);
+  return list;
 }
 
 // human guidance for the status codes a hosted gateway actually returns
@@ -116,7 +172,8 @@ function modelHint(status, text) {
 }
 
 export async function chat(cfg, messages, tools, signal, onDelta, onNote) {
-  const body = { model: cfg.model, messages, temperature: 0.2 };
+  await warmAlias(cfg, signal);
+  const body = { model: realModelId(cfg), messages, temperature: 0.2 };
   if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
   if (cfg.stream === true) body.stream = true;
   if (tools?.length) body.tools = tools.map(t => ({

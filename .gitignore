@@ -2,3 +2,6 @@ node_modules/
 *.tgz
 .DS_Store
 .env
+
+# helper kredensial git (baca token dari .env)
+.git-askpass

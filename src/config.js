@@ -13,6 +13,14 @@ export { CONFIG_DIR as configDirPath };
 
 const cleanUrl = u => String(u ?? '').replace(/\/+$/, '');
 
+// Some gateways front several upstream providers and list them as
+// "upstream/model". Set modelAlias in a provider entry to show all of them in
+// one namespace instead ("mine/model"); the real id goes back on the wire.
+// Off by default: nothing about any particular service is assumed here.
+export function defaultModelAlias() {
+  return '';
+}
+
 // step budget: 30 was too small for real builds, so it is configurable now
 export const DEFAULT_MAX_STEPS = 100;
 
@@ -30,15 +38,22 @@ function resolveProviders(c) {
   const providers = {};
   for (const [name, p] of Object.entries(raw)) {
     if (!p || typeof p !== 'object') continue;
+    const baseUrl = cleanUrl(p.baseUrl);
     providers[String(name)] = {
-      baseUrl: cleanUrl(p.baseUrl),
+      baseUrl,
       apiKey: String(p.apiKey ?? ''),
-      model: String(p.model ?? '')
+      model: String(p.model ?? ''),
+      modelAlias: String(p.modelAlias ?? defaultModelAlias())
     };
   }
   let provider = String(c.provider ?? '');
   if (!Object.keys(providers).length && (c.baseUrl || c.model)) {
-    providers.default = { baseUrl: cleanUrl(c.baseUrl), apiKey: String(c.apiKey ?? ''), model: String(c.model ?? '') };
+    providers.default = {
+      baseUrl: cleanUrl(c.baseUrl),
+      apiKey: String(c.apiKey ?? ''),
+      model: String(c.model ?? ''),
+      modelAlias: defaultModelAlias()
+    };
     provider = provider || 'default';
   }
   if (!providers[provider]) provider = Object.keys(providers)[0] ?? '';
@@ -47,9 +62,19 @@ function resolveProviders(c) {
     if (c.baseUrl !== undefined) active.baseUrl = cleanUrl(c.baseUrl);
     if (c.apiKey !== undefined) active.apiKey = String(c.apiKey ?? '');
     if (c.model !== undefined) active.model = String(c.model);
+    if (c.modelAlias !== undefined) active.modelAlias = String(c.modelAlias);
   }
-  const active = provider ? providers[provider] : { baseUrl: '', apiKey: '', model: '' };
-  return { providers, provider, baseUrl: active.baseUrl, apiKey: active.apiKey, model: active.model };
+  const active = provider
+    ? providers[provider]
+    : { baseUrl: '', apiKey: '', model: '', modelAlias: '' };
+  return {
+    providers,
+    provider,
+    baseUrl: active.baseUrl,
+    apiKey: active.apiKey,
+    model: active.model,
+    modelAlias: active.modelAlias
+  };
 }
 
 export function normalize(c) {
@@ -60,6 +85,7 @@ export function normalize(c) {
     baseUrl: p.baseUrl,
     apiKey: p.apiKey,
     model: p.model,
+    modelAlias: p.modelAlias,
     reasoning: c.reasoning === 'high' ? 'high' : 'low',
     mode: c.mode === 'plan' ? 'plan' : 'build',
     memory: c.memory !== false,
@@ -127,21 +153,23 @@ export function providerNames(cfg) {
 export function setActiveProvider(cfg, name) {
   const p = cfg?.providers?.[name];
   if (!p) return null;
-  return saveConfig(normalize({ ...cfg, provider: name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model }));
+  return saveConfig(normalize({ ...cfg, provider: name, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, modelAlias: p.modelAlias }));
 }
 
 export function addProvider(cfg, name, profile) {
   const key = String(name ?? '').trim();
   if (!key) return null;
+  const baseUrl = cleanUrl(profile?.baseUrl);
   const prof = {
-    baseUrl: cleanUrl(profile?.baseUrl),
+    baseUrl,
     apiKey: String(profile?.apiKey ?? ''),
-    model: String(profile?.model ?? '')
+    model: String(profile?.model ?? ''),
+    modelAlias: String(profile?.modelAlias ?? defaultModelAlias())
   };
   if (!prof.baseUrl || !prof.model) return null;
   const providers = { ...(cfg?.providers ?? {}), [key]: prof };
   // adding a provider makes it active: that is the usual intent
-  return saveConfig(normalize({ ...cfg, providers, provider: key, baseUrl: prof.baseUrl, apiKey: prof.apiKey, model: prof.model }));
+  return saveConfig(normalize({ ...cfg, providers, provider: key, baseUrl: prof.baseUrl, apiKey: prof.apiKey, model: prof.model, modelAlias: prof.modelAlias }));
 }
 
 export function removeProvider(cfg, name) {
@@ -149,8 +177,8 @@ export function removeProvider(cfg, name) {
   if (!providers[name]) return null;
   delete providers[name];
   const provider = cfg.provider === name ? (Object.keys(providers)[0] ?? '') : cfg.provider;
-  const p = providers[provider] ?? { baseUrl: '', apiKey: '', model: '' };
-  return saveConfig(normalize({ ...cfg, providers, provider, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model }));
+  const p = providers[provider] ?? { baseUrl: '', apiKey: '', model: '', modelAlias: '' };
+  return saveConfig(normalize({ ...cfg, providers, provider, baseUrl: p.baseUrl, apiKey: p.apiKey, model: p.model, modelAlias: p.modelAlias }));
 }
 
 export function clearConfig() {

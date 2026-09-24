@@ -2,7 +2,7 @@
 
 import { fetchModels, chat } from './provider.js';
 import { saveConfig } from './config.js';
-import { BUILTIN } from './builtin.js';
+import { BUILTIN, aliasFor } from './builtin.js';
 import { bold, dim, red, yellow, green, cyan, trunc, logo, BANNER, startSpinner } from './ui.js';
 
 export async function testConnection(cfg, signal) {
@@ -60,7 +60,10 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     if (!rejectCommand(apiKey)) apiKey = '';
   }
 
-  const probe = { baseUrl, apiKey, model: 'x' };
+  // the built-in gateway fronts several upstreams, so its models are shown
+  // under one name; a base URL the user typed keeps whatever it sends
+  const modelAlias = aliasFor(baseUrl);
+  const probe = { baseUrl, apiKey, model: 'x', modelAlias };
   console.log(dim('\n   Checking connection...'));
   let models = [];
   let connErr = '';
@@ -72,7 +75,8 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   }
   connSpin.stop();
   if (models.length > 0) {
-    console.log(green(`   Connected. ${models.length} models available.`));
+    console.log(green(`   Connected. ${models.length} models available.`)
+      + (modelAlias ? dim(`  shown as ${modelAlias}/*`) : ''));
   } else if (connErr) {
     // say what actually failed: a beginner must not be told "Connected" and
     // then hit an invisible wall three questions later
@@ -104,7 +108,7 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     let testSpin = null;
     try {
       testSpin = startSpinner('testing ' + model);
-      const reply = await testConnection({ baseUrl, apiKey, model });
+      const reply = await testConnection({ baseUrl, apiKey, model, modelAlias });
       testSpin.stop();
       console.log(green('   Works.') + dim(` Replied: ${trunc(reply, 40)}`));
       saved = true;
@@ -140,7 +144,7 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
       } else if (/^b/i.test(choice)) {
         baseUrl = await ask('   API base URL: ') || baseUrl;
         console.log(dim('   Testing again...'));
-        try { models = await fetchModels({ baseUrl, apiKey, model: 'x' }); } catch {}
+        try { models = await fetchModels({ baseUrl, apiKey, model: 'x', modelAlias }); } catch {}
       } else if (/^s/i.test(choice)) {
         saved = true;
       }

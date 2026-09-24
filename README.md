@@ -52,6 +52,30 @@ ineed provider remove local        # drop one
 
 Inside a session: `/provider` lists them, `/provider <name>` switches, `/provider add` sets one up, `/provider remove <name>` drops it. To only point the current provider at another endpoint: `/config baseurl http://localhost:11434/v1`.
 
+### Gateways that list several upstreams
+
+Some gateways answer `/models` with `upstream/model` pairs, one namespace per
+company behind them. Set `modelAlias` on that provider and the whole list is
+shown as `yourprefix/model` instead, so you pick one flat list; the real id is
+put back on the wire when the request goes out, and a model that two upstreams
+both offer appears once.
+
+```json
+"providers": {
+  "gateway": {
+    "baseUrl": "https://gateway.example/v1",
+    "apiKey": "sk-...",
+    "model": "mine/glm-5.3-flash",
+    "modelAlias": "mine"
+  }
+}
+```
+
+Off by default: without it the model list is exactly what the provider sends.
+The built-in `ineed.codes` gateway sets it for you, because that gateway fronts
+several upstream providers; bring your own base URL and you get no renaming and
+no extra questions in setup.
+
 For scripts, CI, or a one-off run, environment variables override the config file entirely (no config needed):
 
 ```bash

@@ -8,6 +8,7 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const CLI = path.join(ROOT, 'src', 'cli.js');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'ineed-smoke-'));
 const CFG = path.join(TMP, 'cfg');
@@ -31,6 +32,7 @@ const check = (name, ok, detail = '') => {
 
 function mock(script) {
   let ratelimitHit = false;
+  let lastModel = null;
   const reply = content => ({ choices: [{ message: { role: 'assistant', content } }] });
   const call = (name, args) => ({
     choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'c' + Math.random().toString(36).slice(2), type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }]
@@ -45,6 +47,13 @@ function mock(script) {
       }
       if (req.url.endsWith('/models')) {
         if (script === 'nomodels') return send(200, { data: [] });
+        if (script === 'alias') {
+          return send(200, { data: [
+            { id: 'ineed/glm-5.3-flash' }, { id: 'ineed/deepseek-v4.1-flash' },
+            { id: 'jerouterv2/grok-4.6' }, { id: 'jerouterv2/deepseek-v4.1-flash' },
+            { id: 'kiro/claude-sonnet-4.5' }
+          ] });
+        }
         return send(200, { data: [{ id: 'mock-mini' }, { id: 'mock-pro' }, { id: 'gpt-4o-mini' }] });
       }
       if (!req.url.endsWith('/chat/completions')) return send(404, { error: 'nope' });
@@ -70,6 +79,8 @@ function mock(script) {
         return res.end();
       }
       const parsed = JSON.parse(body || '{}');
+      lastModel = parsed.model ?? null;
+      if (script === 'alias') return send(200, reply('ALIAS-OK'));
       const msgs = parsed.messages ?? [];
       const toolResults = msgs.filter(m => m.role === 'tool').map(m => String(m.content ?? ''));
       const hadTools = toolResults.length > 0;
@@ -361,7 +372,11 @@ function mock(script) {
       send(200, resp);
     });
   });
-  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port })));
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
+    server,
+    port: server.address().port,
+    get lastModel() { return lastModel; }
+  })));
 }
 
 function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null, typeAt = null } = {}) {
@@ -401,7 +416,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.11.0'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed ' + VERSION), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('--reset') && out.includes('-h') && out.includes('tanpa slash'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -570,7 +585,15 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.11.0'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v' + VERSION), out);
+
+  // a real message through the REPL, not just slash commands: this is the only
+  // path where a token report arrives, and where an undefined variable in the
+  // usage hook used to throw mid-answer (shipped broken since 1.9.1)
+  const { out: talkOut, code: talkCode } = await run([], { input: 'apa kabar\n/exit\n' });
+  check('session: pesan biasa dijawab tanpa error', talkCode === 0 && !/is not defined/.test(talkOut), talkOut);
+  check('session: jawaban model sampai ke user', /kabar|OK|halo/i.test(talkOut), talkOut);
+  check('session: hitungan token tidak melempar error', !/ReferenceError|✗/.test(talkOut), talkOut);
   server.close();
 }
 
@@ -1335,6 +1358,115 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
     if (/github\.com\/ineedcodes/.test(txt)) { clean = false; check('repo url scan: ' + f, false, 'wrong url found'); }
   }
   check('repo url scan: only salsabila2507 referenced', clean);
+}
+
+// ── model alias: one namespace for a multi-provider gateway ──
+{
+  const { buildModelAlias, fetchModels } = await import(path.join(ROOT, 'src', 'provider.js'));
+  const { normalize, defaultModelAlias } = await import(path.join(ROOT, 'src', 'config.js'));
+
+  const upstream = [
+    'ineed/glm-5.3-flash', 'ineed/deepseek-v4.1-flash', 'ineed/kimi-k2.6',
+    'jerouterv2/grok-4.6', 'jerouterv2/step-3.7-flash',
+    'jerouterv2/deepseek-v4.1-flash', 'kiro/claude-sonnet-4.5'
+  ];
+  const { list, map } = buildModelAlias(upstream, 'ineed');
+  check('alias: semua model jadi satu namespace',
+    list.every(m => m.startsWith('ineed/')), list.join(', '));
+  check('alias: nama yang sama di dua provider digabung satu',
+    list.filter(m => m === 'ineed/deepseek-v4.1-flash').length === 1 && list.length === 6, 'jumlah=' + list.length);
+  check('alias: model milik gateway sendiri yang menang',
+    map.get('ineed/deepseek-v4.1-flash') === 'ineed/deepseek-v4.1-flash', map.get('ineed/deepseek-v4.1-flash'));
+  check('alias: model khas provider lain tetap terpakai',
+    map.get('ineed/grok-4.6') === 'jerouterv2/grok-4.6' && map.get('ineed/claude-sonnet-4.5') === 'kiro/claude-sonnet-4.5',
+    map.get('ineed/grok-4.6') + ' | ' + map.get('ineed/claude-sonnet-4.5'));
+  check('alias: nama tanpa prefix tidak dirusak',
+    buildModelAlias(['gpt-4o-mini', 'o3'], 'ineed').list.join() === 'gpt-4o-mini,o3',
+    buildModelAlias(['gpt-4o-mini', 'o3'], 'ineed').list.join());
+
+  check('alias: tidak ada asumsi service tertentu, default kosong',
+    defaultModelAlias() === '' && defaultModelAlias('https://api.ineed.codes/v1') === ''
+    && defaultModelAlias('https://api.openai.com/v1') === '');
+  const cfg = normalize({ baseUrl: 'https://gateway.example/v1', apiKey: 'k', model: 'a/b' });
+  check('alias: tanpa设置, semua model apa adanya',
+    cfg.modelAlias === '' && cfg.model === 'a/b', cfg.modelAlias);
+  const cfgOn = normalize({ baseUrl: 'https://gateway.example/v1', model: 'a/b', modelAlias: 'mine' });
+  check('alias: aktif kalau diminta di config', cfgOn.modelAlias === 'mine', cfgOn.modelAlias);
+
+  // hanya gateway bawaan yang membawa nama tampilan, tanpa pertanyaan tambahan
+  const { BUILTIN, aliasFor } = await import(path.join(ROOT, 'src', 'builtin.js'));
+  check('alias: gateway bawaan memakai satu nama, URL lain tidak',
+    aliasFor(BUILTIN.baseUrl) === 'ineed'
+    && aliasFor('https://api.openai.com/v1') === ''
+    && aliasFor('https://gateway.example/v1') === '',
+    BUILTIN.baseUrl + ' -> ' + aliasFor(BUILTIN.baseUrl));
+  const cfgOff = normalize({ baseUrl: 'https://gateway.example/v1', model: 'a/x', modelAlias: '' });
+  check('alias: bisa dimatikan manual', cfgOff.modelAlias === '', cfgOff.modelAlias);
+  const twoProv = normalize({
+    providers: {
+      a: { baseUrl: 'https://x.example/v1', model: 'a/b', modelAlias: 'mine' },
+      b: { baseUrl: 'https://y.example/v1', model: 'c/d' }
+    },
+    provider: 'b'
+  });
+  check('alias: alias tersimpan per provider, tidak ikut provider lain',
+    twoProv.modelAlias === '' && twoProv.providers.a.modelAlias === 'mine', twoProv.modelAlias);
+
+  // /provider harus menjelaskan namespace-nya, provider lain tidak boleh ikut
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: {
+      mine: { baseUrl: 'https://gateway.example/v1', apiKey: SECRET, model: 'ineed/glm-5.3-flash', modelAlias: 'ineed' },
+      plain: { baseUrl: 'https://api.openai.com/v1', apiKey: SECRET, model: 'gpt-4o-mini' }
+    },
+    provider: 'mine'
+  }, null, 2), { mode: 0o600 });
+  const provList = await run(['provider']);
+  check('alias: /provider menjelaskan namespace yang dipakai',
+    provList.out.includes('all models shown as ineed/*'), provList.out);
+  check('alias: /provider tidak menempelkan catatan itu ke provider lain',
+    (provList.out.match(/all models shown as/g) || []).length === 1, provList.out);
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: { plain: { baseUrl: 'https://api.openai.com/v1', apiKey: SECRET, model: 'gpt-4o-mini' } },
+    provider: 'plain'
+  }, null, 2), { mode: 0o600 });
+  const provPlain = await run(['provider']);
+  check('alias: provider tanpa alias tidak menampilkan catatan',
+    !provPlain.out.includes('all models shown as'), provPlain.out);
+
+  // picker menampilkan nama baru, request memakai nama asli
+  const aliasMock = await mock('alias');
+  const { server, port } = aliasMock;
+  const base = `http://127.0.0.1:${port}/v1`;
+  const state = { baseUrl: base, apiKey: SECRET, model: 'ineed/grok-4.6', modelAlias: 'ineed' };
+  const shown = await fetchModels(state);
+  check('alias: /model hanya menampilkan namespace ineed',
+    shown.includes('ineed/grok-4.6') && !shown.some(m => m.startsWith('jerouterv2/')), shown.join(', '));
+  const { chat } = await import(path.join(ROOT, 'src', 'provider.js'));
+  await chat(state, [{ role: 'user', content: 'hi' }], null, undefined, () => {}, () => {});
+  check('alias: request dikirim memakai nama asli',
+    aliasMock.lastModel === 'jerouterv2/grok-4.6', 'terkirim=' + aliasMock.lastModel);
+  server.close();
+
+  // one-shot: the list is never pulled, so chat must resolve the name by itself
+  const coldMock = await mock('alias');
+  const coldCfg = {
+    baseUrl: `http://127.0.0.1:${coldMock.port}/v1`,
+    apiKey: SECRET,
+    model: 'ineed/grok-4.6',
+    modelAlias: 'ineed'
+  };
+  await chat(coldCfg, [{ role: 'user', content: 'hi' }], null, undefined, () => {}, () => {});
+  check('alias: one-shot tanpa /model tetap terkirim benar',
+    coldMock.lastModel === 'jerouterv2/grok-4.6', 'terkirim=' + coldMock.lastModel);
+  coldMock.server.close();
+
+  // a name the gateway does not know must go out untouched, never guessed
+  const plainMock = await mock('plain');
+  await chat({ ...coldCfg, baseUrl: `http://127.0.0.1:${plainMock.port}/v1`, model: 'gpt-4o-mini' },
+    [{ role: 'user', content: 'hi' }], null, undefined, () => {}, () => {});
+  check('alias: nama yang bukan alias tidak diubah',
+    plainMock.lastModel === 'gpt-4o-mini', 'terkirim=' + plainMock.lastModel);
+  plainMock.server.close();
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

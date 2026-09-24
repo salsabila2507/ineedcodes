@@ -101,6 +101,9 @@ if (args[0] === 'skills-sync') {
   process.exit(0);
 }
 
+// a gateway that lists several upstreams is shown to the user as one namespace
+const aliasNote = alias => (alias ? '  (all models shown as ' + alias + '/*)' : '');
+
 // provider: manage saved providers (any OpenAI-compatible API). Bare
 // `ineed provider` is a numbered menu for beginners; `use <name>` also repairs
 // the model by pulling the live list from the provider that was picked.
@@ -124,7 +127,7 @@ if (args[0] === 'provider') {
     names.forEach((n, i) => {
       const p = cfg.providers[n];
       console.log('  ' + (n === cfg.provider ? green('*') : ' ') + ' ' + dim(String(i + 1) + '. ') + bold(n)
-        + dim('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
+        + dim('  ' + p.baseUrl + '  model: ' + (p.model || '(none)') + aliasNote(p.modelAlias)));
     });
     // interactive only on a real terminal, so scripts and pipes keep working
     if (process.stdin.isTTY && process.stdout.isTTY) {
@@ -152,7 +155,7 @@ if (args[0] === 'provider') {
     const name = /^\d+$/.test(raw) ? names[Number(raw) - 1] : raw;
     const r = await switchProviderLive(cfg, name ?? '');
     if (!r.ok) { console.error(red(r.error)); process.exit(1); }
-    console.log(green('Provider: ' + r.cfg.provider) + dim('  ' + r.cfg.baseUrl + '  model: ' + r.cfg.model));
+    console.log(green('Provider: ' + r.cfg.provider) + dim('  ' + r.cfg.baseUrl + '  model: ' + r.cfg.model + aliasNote(r.cfg.modelAlias)));
     if (r.modelChanged) {
       console.log(dim('  old model is not in that catalog, now using: ') + r.model);
     }
@@ -177,7 +180,7 @@ if (args[0] === 'provider') {
       rl.close();
       const next = addProvider(cfg, name, prof);
       if (!next) { console.error(red('Could not save that provider.')); process.exit(1); }
-      console.log(green('Provider "' + name + '" saved and active.') + dim('  ' + next.baseUrl + '  model: ' + next.model));
+      console.log(green('Provider "' + name + '" saved and active.') + dim('  ' + next.baseUrl + '  model: ' + next.model + aliasNote(next.modelAlias)));
     } catch {
       rl.close();
       console.error(red('Aborted. Nothing saved.'));

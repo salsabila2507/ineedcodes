@@ -286,6 +286,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // counted per task and for the whole session (price depends on the provider)
   let sessionTokens = 0;
   let taskTokens = 0;
+  // token terakhir yang sudah dihitung untuk task berjalan: harus di scope yang
+  // sama dengan hooksForRun, kalau tidak onUsage melempar ReferenceError
+  let taskSeen = 0;
   const kfmt = n => n >= 1_000_000 ? (n / 1_000_000).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
   var tuiReady = false;
   let spinnerFrame = null;   // current frame of the live working-line spinner
@@ -651,7 +654,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     const hooks = hooksForRun();
     const stopSpinner = hooks.spinnerStop;
     startWork('Working');
-    let taskSeen = 0;
+    taskSeen = 0;
     lastProgressAt = 0;
     let retrying = false;   // the retry's own finally owns the cleanup then
     try {
