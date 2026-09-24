@@ -17,18 +17,26 @@ export function skillsSync(opts = {}) {
   try {
     const r = spawnSync('git', ['clone', '--depth', '1', '--quiet', repo, tmp], { encoding: 'utf8', timeout: 120_000 });
     if (r.status !== 0) return { ok: false, error: ((r.stderr ?? '') || 'git clone failed').trim().slice(0, 300) };
+    // show exactly what was downloaded: an unpinned clone is only trustworthy if
+    // the user can see which commit landed on their machine
+    const head = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: tmp, encoding: 'utf8' });
+    const commit = (head.stdout ?? '').trim();
     const src = path.join(tmp, 'skills');
     let entries;
     try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch { return { ok: false, error: 'the repository has no skills/ folder' }; }
     const dest = path.join(CONFIG_DIR, 'skills');
     fs.mkdirSync(dest, { recursive: true });
     let copied = 0;
+    const added = [];
+    const replaced = [];
     for (const e of entries) {
       if (!e.isDirectory() || !fs.existsSync(path.join(src, e.name, 'SKILL.md'))) continue;
+      if (fs.existsSync(path.join(dest, e.name))) replaced.push(e.name);
+      else added.push(e.name);
       fs.cpSync(path.join(src, e.name), path.join(dest, e.name), { recursive: true });
       copied++;
     }
-    return { ok: true, copied, dest };
+    return { ok: true, copied, dest, repo, commit, added, replaced };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

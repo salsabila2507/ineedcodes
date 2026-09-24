@@ -93,6 +93,9 @@ if (args[0] === 'skills-sync') {
     process.exit(1);
   }
   console.log(green(`Synced ${r.copied} skill(s) to ${r.dest}.`));
+  console.log(dim('  from ' + r.repo + (r.commit ? ' @ ' + r.commit : '')));
+  if (r.added?.length) console.log(dim('  added: ' + r.added.join(', ')));
+  if (r.replaced?.length) console.log(yellow('  replaced existing: ' + r.replaced.join(', ')));
   console.log(dim('Activate them in a task by saying "take me to jungle", or set a custom keyword with ineed unlock.'));
   console.log(yellow('Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
@@ -163,6 +166,7 @@ if (args[0] === 'provider') {
   if (sub === 'add') {
     const name = (args[2] ?? '').trim();
     if (!name) { console.error(red('Usage: ineed provider add <name>')); process.exit(1); }
+    if (cfg.providers?.[name]) console.log(yellow('  "' + name + '" already exists: its key and model will be replaced.'));
     const readline = await import('node:readline');
     const { makeInput } = await import('./ui.js');
     const { wizard } = await import('./wizard.js');
@@ -184,6 +188,13 @@ if (args[0] === 'provider') {
 
   if (sub === 'remove') {
     const name = (args[2] ?? '').trim();
+    if (cfg.providers?.[name] && process.stdin.isTTY) {
+      const { makeInput: mi } = await import('./ui.js');
+      const rlx = (await import('node:readline')).createInterface({ input: process.stdin, output: process.stdout });
+      const a = (await mi(rlx)(`  remove provider "${name}" and its key? [y/N] `)).trim().toLowerCase();
+      rlx.close();
+      if (a !== 'y' && a !== 'yes') { console.log(dim('Cancelled.')); process.exit(0); }
+    }
     const next = removeProvider(cfg, name);
     if (!next) { console.error(red('No provider named ' + (name || '(empty)') + '.')); process.exit(1); }
     console.log(green('Removed "' + name + '".') + (next.provider ? dim(' Active: ' + next.provider) : dim(' No providers left.')));
@@ -204,14 +215,55 @@ if (args[0] === '--child') {
     process.exit(1);
   }
   try {
+    // Permission handling in one-shot mode: with a real terminal the user is
+    // asked (y / a = allow for this whole run / s = save / n). Without a
+    // terminal (CI, pipes) there is nobody to ask, so it runs unattended and says
+    // so out loud instead of silently allowing everything.
+    const canAsk = process.stdin.isTTY && process.stdout.isTTY;
+    const approved = new Set();
+    if (!canAsk) {
+      console.log(yellow('  No terminal: file edits and shell commands run without asking (this is the CI behavior).'));
+      console.log(dim('  Run ineed in a terminal if you want to approve each step.'));
+    }
+    const { makeInput } = await import('./ui.js');
+    let rl = null;
+    const ask = async q => {
+      if (!canAsk) return '';
+      if (!rl) {
+        const readlineMod = await import('node:readline');
+        rl = readlineMod.createInterface({ input: process.stdin, output: process.stdout });
+      }
+      return makeInput(rl)(q);
+    };
+    let interrupted = null;
+    process.on('SIGINT', () => { if (interrupted) process.exit(interrupted); interrupted = 2; console.log('\n' + yellow('Stopping...') + dim(' (report below)')); });
     const res = await runObjective(cfg, task, process.cwd(), [], {
       onTodos: list => {
         const mark = s => s === 'completed' ? green('✔') : s === 'in_progress' ? cyan('▸') : dim('○');
         console.log(box([bold('To-do'), ...list.map(t => '  ' + mark(t.status) + ' ' + t.content)]));
+      },
+      onResult: (out, name) => {
+        if (process.env.INEED_QUIET) return;
+        const first = String(out ?? '').split('\n')[0].slice(0, 90);
+        if (first) console.log(dim('  · ' + name + ': ' + first));
+      },
+      onNote: n => console.log(dim('  ' + n)),
+      approved,
+      onApprove: async (cat, name, input) => {
+        if (!canAsk) return true;
+        const a = (await ask(`  allow ${name}${input?.command ? ': ' + String(input.command).slice(0, 90) : input?.path ? ': ' + input.path : ''}? [y] once · [a] allow all this run · [n] no: `)).trim().toLowerCase();
+        if (a === 'a' || a === 'all') { approved.add(cat); return 'always'; }
+        if (a === 'y' || a === 'yes') return true;
+        return false;
       }
     });
+    try { rl?.close(); } catch {}
     if (res.aborted) {
-      console.log('\n' + yellow('Stopped.') + dim(' Task did not finish (step limit or Ctrl+C). Re-run to continue.'));
+      console.log('\n' + yellow('Stopped.') + dim(' The task did not finish. What got done before the stop:'));
+      if (res.changed?.length) console.log('  ' + dim('files touched: ') + res.changed.join(', '));
+      if (res.ran?.length) console.log('  ' + dim('commands run: ' + res.ran.length + ' (last: ' + res.ran[res.ran.length - 1] + ')'));
+      if (!res.changed?.length && !res.ran?.length) console.log('  ' + dim('nothing was written or run'));
+      console.log('  ' + dim('Re-run the same command to continue.'));
       process.exit(2);
     }
     console.log('\n' + bold(green('Done')) + (res.changed?.length ? dim('  changed: ' + res.changed.join(', ')) : ''));
@@ -219,6 +271,9 @@ if (args[0] === '--child') {
     process.exit(0);
   } catch (err) {
     console.error(red('Error: ' + err.message));
+    if (err.partial?.changed?.length) console.error(dim('  files already changed: ' + err.partial.changed.join(', ')));
+    if (err.partial?.ran?.length) console.error(dim('  commands already run: ' + err.partial.ran.length + ' (last: ' + err.partial.ran[err.partial.ran.length - 1] + ')'));
+    if (/\/etc\/|\.ssh|\.env/.test(err.message)) console.error(dim('  (paths like /etc, .ssh, .env stay blocked on purpose)'));
     process.exit(1);
   }
 }
@@ -236,6 +291,10 @@ if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
   const { fileURLToPath } = await import('node:url');
   console.log(dim('Working... (Ctrl+C to stop)'));
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', ...args], { stdio: 'inherit' });
+  // Ctrl+C in the parent reaches the worker too, so the task can report what it
+  // managed to do instead of both processes dying mid-write
+  process.on('SIGINT', () => { try { child.kill('SIGINT'); } catch {} });
+  process.on('SIGTERM', () => { try { child.kill('SIGTERM'); } catch {} });
   child.on('exit', code => process.exit(code ?? 1));
 } else {
   // interactive session or setup
@@ -264,6 +323,12 @@ if (args.length > 0 && !['--reset', '--resume', '-r'].includes(args[0])) {
   let cfg = loadConfig();
   const fresh = !cfg;
   if (!cfg) {
+    if (!process.stdin.isTTY) {
+      // no terminal to type into: say what is happening, and let the wizard
+      // abort cleanly on EOF instead of hanging on a hidden prompt
+      console.log(dim('No terminal detected: the setup questions below need a terminal, so this will stop.'));
+      console.log(dim('Run ineed in a normal terminal, or set INEED_BASE_URL, INEED_API_KEY and INEED_MODEL for a headless run.'));
+    }
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ask = makeInput(rl);
     try {

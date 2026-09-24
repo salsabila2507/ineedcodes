@@ -6,8 +6,14 @@ import { spawn, spawnSync } from 'node:child_process';
 
 // ── git wrappers (master prompt #26): structured ops, no remote push without the user ──
 function git(args, cwd) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  // a hook, a pager or a locked index can hang git forever: bound every call
+  const r = spawnSync('git', args, {
+    cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 60_000,
+    env: { ...process.env, GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
+  });
   const out = ((r.stdout ?? '') + (r.stderr ?? '')).trim();
+  if (r.error?.code === 'ETIMEDOUT') return { ok: false, out: 'git timed out after 60s (a hook, a pager, or a lock may be blocking it)' };
+  if (r.error) return { ok: false, out: 'git failed: ' + r.error.message };
   return { ok: r.status === 0, out };
 }
 
@@ -89,7 +95,7 @@ export const TOOLS = [
   },
   {
     name: 'search_text',
-    description: 'Search file contents for a string, returns file:line: matches (max 100).',
+    description: 'Search file contents, returns file:line: matches (max 100). Plain text works; a /pattern/ is treated as a regular expression.',
     parameters: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'directory, defaults to working directory' } }, required: ['pattern'] },
     allowedInPlan: true
   },
@@ -199,6 +205,16 @@ export function runTool(name, input, cwd) {
     if (name === 'search_text') {
       const pattern = String(input.pattern ?? '');
       if (!pattern) return { output: 'Error: empty pattern.' };
+      // /foo/i means regex, everything else is a literal string, so a dot in a
+      // filename never turns into a wildcard by accident
+      const asRegex = /^\/(.*)\/([a-z]*)$/.exec(pattern);
+      let test;
+      if (asRegex) {
+        try { const re = new RegExp(asRegex[1], asRegex[2].replace(/g/g, '') + 'i'); test = line => re.test(line); }
+        catch { test = line => line.includes(pattern); }
+      } else {
+        test = line => line.includes(pattern);
+      }
       const out = [];
       const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache']);
       (function walk(d, depth) {
@@ -214,7 +230,7 @@ export function runTool(name, input, cwd) {
           let lines;
           try { lines = fs.readFileSync(p, 'utf8').split('\n'); } catch { continue; }
           for (let i = 0; i < lines.length && out.length < 100; i++) {
-            if (lines[i].includes(pattern)) out.push(`${path.relative(cwd, p)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+            if (test(lines[i])) out.push(`${path.relative(cwd, p)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
           }
         }
       })(abs, 0);
@@ -223,9 +239,11 @@ export function runTool(name, input, cwd) {
     if (name === 'write_file') {
       if (isSecret(abs)) return { output: 'Refused: that path looks like a secret file, and secrets never enter or leave the model context.' };
       const content = String(input.content ?? '');
+      const existed = fs.existsSync(abs);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, content);
-      return { output: `Wrote ${path.relative(cwd, abs) || '.'} (${content.length} bytes).` };
+      const rel = path.relative(cwd, abs) || '.';
+      return { output: existed ? `Overwrote ${rel} (${content.length} bytes).` : `Wrote ${rel} (${content.length} bytes).` };
     }
     if (name === 'edit_file') {
       if (isSecret(abs)) return { output: 'Refused: that looks like a secret file.' };
@@ -260,8 +278,10 @@ export function runTool(name, input, cwd) {
       // secret-file block (copy .env to notes.txt, then read notes.txt)
       if (isSecret(abs) || isSecret(dest)) return { output: 'Refused: secret files stay where they are, so keys never end up in readable files.' };
       if (isGitInternal(dest)) return { output: 'Refused: writing into .git/ is blocked (hooks are executable).' };
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      const existed = fs.existsSync(dest);
       fs.copyFileSync(abs, dest);
-      return { output: `Copied ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}.` };
+      return { output: `Copied ${path.relative(cwd, abs)} -> ${path.relative(cwd, dest)}${existed ? ' (replaced the file that was there)' : ''}.` };
     }
     if (name === 'move_file') {
       const dest = path.resolve(cwd, String(input.to ?? ''));
@@ -281,42 +301,79 @@ const DESTRUCTIVE = [
   /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+[^&|;]*\/(\s|$)/i,
   /\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*[rf]/i,          // recursive+force in one flag (-rf, -fr, -Rf...)
   /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+){2,}/i,     // recursive and force as separate flags
+  /\brm\b[^\n]*(--no-preserve-root|~|\$HOME|\/\*|\s\*\s*$|\s\.\s*$)/i,
   /\bmkfs\b/i,
-  /\bdd\s+if=/i,
-  /\bgit\s+push\s+.*--force/i,
-  /\bgit\s+reset\s+--hard\s+origin/i,
-  /:\(\)\{\s*:\|:\s*&\s*\}\s*;:/
+  /\bdd\s+(if|of)=/i,
+  /\b(shred|srm)\b/i,
+  /\bgit\s+push\b[^\n]*(--force|delete)/i,
+  /\bgit\s+push\b[^\n]*\s-f(\s|$)/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\b[^\n]*-[a-zA-Z]*[dfx]/i,       // git clean -fd, -fdx
+  /\bgit\s+checkout\s+--\s+\./i,
+  /\bgit\s+branch\s+-D\b/i,
+  /\bgit\s+filter-branch\b|\bgit\s+reflog\s+expire\b/i,
+  /\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba|z|k|)sh\b/i,   // curl ... | sh
+  /\bchmod\s+(-[a-zA-Z]+\s+)*777\s+\//i,
+  /\bchown\b[^\n]*\s\/(\s|$)/i,
+  /Remove-Item\b[^\n]*-Recurse/i,                // Windows: Remove-Item -Recurse
+  /\bdel\b[^\n]*\/[sf]\b/i,                      // Windows: del /f /s
+  /\bformat\b\s+[a-z]:/i,
+  /\bcipher\s+\/w/i,
+  /:\(\)\{\s*:\|:\s*:\s*&\s*\}\s*;:/
 ];
 
+// Commands that destroy data are never run by the agent: the user does those
+// themselves. Anything merely disruptive (npm install, kill, chmod on a project
+// file) goes through the normal permission prompt instead of a hard block.
 export function isDestructive(command) {
   return DESTRUCTIVE.some(re => re.test(command));
 }
 
+
+const SHELL_MAX_OUTPUT = 200_000;   // hard cap so a runaway build cannot eat memory
+const SHELL_HARD_DEADLINE = 150_000;   // after the timeout, resolve even if a grandchild holds the pipe
+
 export function shellRun(command, cwd, signal) {
   return new Promise(resolve => {
-    const child = spawn(command, { cwd, shell: true, env: { ...process.env, NO_COLOR: '1' } });
+    // detached process group: killing it takes the whole tree down, so a child
+    // that ignores SIGKILL cannot keep stdout open and freeze the task
+    const child = spawn(command, { cwd, shell: true, env: { ...process.env, NO_COLOR: '1' }, detached: process.platform !== 'win32' });
     let out = '';
     let settled = false;
     let timedOut = false;
+    let truncated = false;
+    const killTree = () => {
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch { try { child.kill('SIGKILL'); } catch {} }
+    };
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(hardTimer);
       signal?.removeEventListener('abort', onAbort);
-      resolve({ output: `exit code: ${timedOut ? 'timeout' : child.exitCode}\n${out.slice(0, 20_000)}` });
+      const body = out.slice(0, 20_000) + (out.length > 20_000 || truncated ? `\n[output truncated: ${out.length} bytes total]` : '');
+      resolve({ output: `exit code: ${timedOut ? 'timeout' : child.exitCode}\n${body}` });
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill('SIGKILL'); } catch {}
+      killTree();
       out += '\n[timeout after 120s]';
     }, 120_000);
-    const onAbort = () => { try { child.kill('SIGKILL'); } catch {} out += '\n[stopped by user]'; };
+    // a grandchild that survives the kill still holds the pipe open: resolve anyway
+    const hardTimer = setTimeout(() => { killTree(); finish(); }, SHELL_HARD_DEADLINE);
+    const onAbort = () => { killTree(); out += '\n[stopped by user]'; };
     signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', c => {
       out += c.toString();
-      if (out.length > 100_000) { try { child.kill('SIGKILL'); } catch {} }
+      if (out.length > SHELL_MAX_OUTPUT) { truncated = true; out = out.slice(0, SHELL_MAX_OUTPUT); killTree(); }
     });
-    child.stderr.on('data', c => { out += c.toString(); });
+    child.stderr.on('data', c => {
+      out += c.toString();
+      if (out.length > SHELL_MAX_OUTPUT) { truncated = true; out = out.slice(0, SHELL_MAX_OUTPUT); killTree(); }
+    });
     child.on('close', finish);
     child.on('error', err => { out += `spawn error: ${err.message}`; finish(); });
   });

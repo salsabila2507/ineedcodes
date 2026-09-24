@@ -88,11 +88,50 @@ The agent decides what it needs: list files, read code, search, edit, run shell 
 | `/memory` | durable memory status, `/memory on\|off` |
 | `/mcp` | list MCP servers and their tools |
 | `/setup` | reconfigure the active provider (keeps the others) |
-| `/config` | show provider config, API key hidden |
-| `/clear` | forget the current conversation |
+| `/config` | numbered settings menu: permissions, work mode, answer length, memory |
+| `/status` | what is active right now: model, provider, permissions, token use |
+| `/depth` | answer length: `/depth short\|normal\|deep` |
+| `/humanizer` | natural wording pass for html/md copy, on or off |
+| `/theme` | color theme |
+| `/init` | scan this folder and write an AGENTS.md notes file |
+| `/clear` | forget this conversation (asks before deleting the saved copy) |
 | `/exit` | quit |
 
-Shortcuts are optional. Normal language always works.
+Shortcuts are optional. Normal language always works, and the common ones work
+without the slash: type `status`, `provider`, `model`, `help`, or `plan` and they
+run like the command above.
+
+## Safety, in plain words
+
+- The agent works **inside the folder you started it in**. Files outside it are refused.
+- `.env`, `.ssh/`, and `.git/` are never read or written, so keys cannot leak into the model.
+- Destructive commands (`rm -rf`, `git reset --hard`, `git clean`, force push, `curl ... | sh`) are blocked. You run those yourself.
+- Edits and shell commands ask first, unless you allow them for the session: `[y] once`, `[a] allow everything this run`, `[n] no`.
+- One-shot runs (`ineed "task"`) without a terminal run unattended, and they say so before starting.
+
+## When something goes wrong
+
+| what you see | what it means | what to do |
+|---|---|---|
+| `Could not reach ...` | the API address or network failed | check the base URL, usually ending in `/v1` |
+| `API key rejected` | the key is wrong or not allowed there | `ineed provider add <name>` with a new key |
+| `this key is out of credit` | the provider quota is used up | top up, or switch provider with `ineed provider` |
+| `this model does not exist at that provider` | the saved model is gone | `ineed provider` re-pulls the live list and picks a working one |
+| `Out of steps` | the task needed more steps than the budget | say `continue`; raise the budget with `maxSteps` in the config or `INEED_MAX_STEPS=150` |
+| `Stopped.` with a file list | you interrupted it | the files it already wrote are listed; re-run to continue |
+
+## Point it at a local server
+
+Any OpenAI-compatible server works, including one on your own machine:
+
+```bash
+ineed provider add local
+# base URL: http://localhost:20128/v1   (or 11434 for Ollama, 1234 for LM Studio)
+# model id: pick from the list, or type one
+```
+
+ineed tolerates servers that answer with a stream even when streaming was not
+requested, or a JSON body with stream trailers attached.
 
 ## How it works
 

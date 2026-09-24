@@ -184,6 +184,9 @@ export const visLen = s => {
 // terminal. Used by command views; crisp corners, no web-style rounding.
 export function box(lines, colorFn = t => t) {
   const cols = process.stdout.columns || 80;
+  // a window narrower than the box used to produce a negative repeat count and
+  // throw; very narrow terminals get plain lines instead
+  if (cols < 12) return lines.join('\n');
   const inner = Math.min(cols - 4, Math.max(10, ...lines.map(l => visLen(l))) + 2);
   const top = colorFn('┌' + '─'.repeat(inner) + '┐');
   const bot = colorFn('└' + '─'.repeat(inner) + '┘');
@@ -195,7 +198,13 @@ const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '�
 
 // Spinner for TTYs only. In pipes and tests it becomes a no-op.
 export function startSpinner(text = 'thinking') {
-  if (!process.stdout.isTTY || process.env.NO_COLOR) return { stop: () => {} };
+  // NO_COLOR only removes colors, never progress: a long task must not look
+  // frozen in a pipe, a log file, or a terminal with colors turned off
+  if (!process.stdout.isTTY) return { stop: () => {} };
+  if (process.env.NO_COLOR) {
+    process.stdout.write(`... ${text}\n`);
+    return { stop() {} };
+  }
   let i = 0;
   let stopped = false;
   const line = () => `\r${tAccent(SPIN_FRAMES[i++ % SPIN_FRAMES.length])} ${tMuted(text + '...')}  `;
@@ -324,7 +333,7 @@ export function makeInput(rl, onLine, onPending = null) {
   const ask = (q, { secret = false } = {}) => new Promise((res, rej) => {
     process.stdout.write(q + ' ');
     let prevEcho = null;
-    if (secret && process.stdout.isTTY) {
+    if (secret && process.stdin.isTTY) {
       prevEcho = rl._writeToOutput;
       rl._writeToOutput = () => {}; // hide keystrokes while the user types
     }

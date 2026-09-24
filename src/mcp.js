@@ -85,21 +85,34 @@ class McpServer {
     });
   }
 
-  request(method, params) {
+  request(method, params, signal) {
     if (this.dead) return Promise.resolve({ error: { message: `MCP server ${this.name} is not running` } });
     const id = nextId++;
     return new Promise(resolve => {
+      let done = false;
+      const finish = msg => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(msg);
+      };
+      const onAbort = () => {
+        this.pending.delete(id);
+        finish({ error: { message: `MCP ${this.name} call stopped by the user` } });
+      };
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        resolve({ error: { message: `MCP server ${this.name} timed out on ${method}` } });
+        finish({ error: { message: `MCP server ${this.name} timed out on ${method}` } });
       }, 60_000);
-      this.pending.set(id, msg => { clearTimeout(timer); resolve(msg); });
+      this.pending.set(id, msg => finish(msg));
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       } catch (err) {
-        clearTimeout(timer);
         this.pending.delete(id);
-        resolve({ error: { message: `MCP write failed: ${err.message}` } });
+        finish({ error: { message: `MCP write failed: ${err.message}` } });
       }
     });
   }
@@ -119,8 +132,8 @@ class McpServer {
     return this.tools;
   }
 
-  async callTool(name, args) {
-    const res = await this.request('tools/call', { name, arguments: args ?? {} });
+  async callTool(name, args, signal) {
+    const res = await this.request('tools/call', { name, arguments: args ?? {} }, signal);
     if (res.error) return { output: `Error: MCP ${this.name}/${name}: ${res.error.message}` };
     const parts = res.result?.content ?? [];
     const text = parts.filter(p => p.type === 'text').map(p => p.text).join('\n');
@@ -178,11 +191,11 @@ export class McpManager {
     return this.servers.size > 0;
   }
 
-  async call(serverName, toolName, args) {
+  async call(serverName, toolName, args, signal) {
     const server = this.servers.get(serverName);
     if (!server) return { output: `Error: unknown MCP server ${serverName}` };
     if (server.dead) return { output: `Error: MCP server ${serverName} is not running` };
-    return server.callTool(toolName, args);
+    return server.callTool(toolName, args, signal);
   }
 
   killAll() {

@@ -13,6 +13,15 @@ export { CONFIG_DIR as configDirPath };
 
 const cleanUrl = u => String(u ?? '').replace(/\/+$/, '');
 
+// step budget: 30 was too small for real builds, so it is configurable now
+export const DEFAULT_MAX_STEPS = 100;
+
+export function clampSteps(v) {
+  if (v == null || typeof v === 'boolean' || (typeof v === 'string' && !v.trim())) return DEFAULT_MAX_STEPS;
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) ? Math.min(200, Math.max(5, n)) : DEFAULT_MAX_STEPS;
+}
+
 // resolve the providers map and the active name. A legacy flat config (baseUrl
 // at top level) migrates into a "default" provider, and top-level fields act as
 // overrides of the active provider so model/url changes keep working.
@@ -64,6 +73,7 @@ export function normalize(c) {
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
     permShell: c.permShell === 'allow' ? 'allow' : 'ask',
     permNet: c.permNet === 'ask' ? 'ask' : 'allow',
+    maxSteps: clampSteps(c.maxSteps),
     models: (c.models && typeof c.models === 'object' && !Array.isArray(c.models))
       ? Object.fromEntries(Object.entries(c.models).map(([k, v]) => [k, String(v)]))
       : {},
@@ -80,6 +90,7 @@ export function loadConfig() {
   if (process.env.INEED_BASE_URL) cfg.baseUrl = cleanUrl(process.env.INEED_BASE_URL);
   if (process.env.INEED_API_KEY) cfg.apiKey = String(process.env.INEED_API_KEY);
   if (process.env.INEED_MODEL) cfg.model = String(process.env.INEED_MODEL);
+  if (process.env.INEED_MAX_STEPS != null) cfg.maxSteps = clampSteps(process.env.INEED_MAX_STEPS);
   if (!cfg.baseUrl || !cfg.model) return null;
   return cfg;
 }

@@ -47,7 +47,7 @@ const win = process.platform === 'win32';
 const bin = path.join(prefix, 'node_modules', '.bin', win ? 'ineed.cmd' : 'ineed');
 check('installed bin exists and is executable', fs.existsSync(bin) && (win || !!(fs.statSync(bin).mode & 0o111)));
 const v = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 30_000, shell: win });
-check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.8.1'), v.stdout + v.stderr);
+check('installed bin --version works', v.status === 0 && v.stdout.includes('ineed 1.9.0'), v.stdout + v.stderr);
 const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000, shell: win });
 check('installed bin --help works', h.status === 0 && h.stdout.includes('--reset') && h.stdout.includes('ineed "'), h.stdout + h.stderr);
 

@@ -19,7 +19,7 @@ function stripHtml(html) {
     .trim();
 }
 
-export async function fetchUrl(rawUrl) {
+export async function fetchUrl(rawUrl, signal) {
   let url;
   try {
     url = new URL(String(rawUrl));
@@ -32,11 +32,15 @@ export async function fetchUrl(rawUrl) {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 45_000);
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { 'user-agent': 'ineed/1.4 (+https://ineed.codes)', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' },
-      redirect: 'follow'
-    });
+    // the task's own Ctrl+C must reach the request too, or stopping waits 45s
+    const relay = () => ctrl.abort();
+    signal?.addEventListener('abort', relay, { once: true });
+    try {
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        headers: { 'user-agent': 'ineed/1.4 (+https://ineed.codes)', accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1' },
+        redirect: 'follow'
+      });
     // stream the body with a hard cap: res.text() would load unlimited bytes first
     const reader = res.body?.getReader();
     let raw = '';
@@ -51,15 +55,19 @@ export async function fetchUrl(rawUrl) {
         if (total > MAX_BYTES || raw.length > MAX_BYTES) { try { reader.cancel(); } catch {} raw += '\n[truncated]'; break; }
       }
     }
-    clearTimeout(timer);
     const type = res.headers.get('content-type') ?? '';
     const body = raw;
-    if (type.includes('html')) {
-      const text = stripHtml(body);
-      return { output: `HTTP ${res.status} ${url}\n${text.slice(0, 15_000)}` };
+      if (type.includes('html')) {
+        const text = stripHtml(body);
+        return { output: `HTTP ${res.status} ${url}\n${text.slice(0, 15_000)}` };
+      }
+      return { output: `HTTP ${res.status} ${url}\n${body.slice(0, 15_000)}` };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', relay);
     }
-    return { output: `HTTP ${res.status} ${url}\n${body.slice(0, 15_000)}` };
   } catch (err) {
+    if (signal?.aborted) return { output: 'Stopped by the user.' };
     return { output: `Error: fetch failed: ${err.message}` };
   }
 }
@@ -70,12 +78,12 @@ export function searchConfigured(cfg) {
 
 // Uses any search engine that accepts {query} in a URL template and returns HTML/JSON,
 // e.g. a self-hosted SearXNG: http://localhost:8888/search?q={query}&format=json
-export async function webSearch(cfg, query) {
+export async function webSearch(cfg, query, signal) {
   if (!searchConfigured(cfg)) {
     return { output: 'Search unavailable: no search provider configured. Set "searchUrl" in ~/.ineedcodes/config.json (a URL template containing {query}). Web page reading via fetch_url still works.' };
   }
   const url = String(cfg.searchUrl).replace('{query}', encodeURIComponent(String(query).slice(0, 300)));
-  const r = await fetchUrl(url);
+  const r = await fetchUrl(url, signal);
   if (r.output.startsWith('Error:')) return { output: `Error: web_search: ${r.output}` };
   return { output: `web search for "${query}":\n${r.output.slice(0, 8_000)}` };
 }

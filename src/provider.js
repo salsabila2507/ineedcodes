@@ -1,6 +1,50 @@
 // provider.js: OpenAI-compatible chat + model listing. Timeout and cancellation built in.
 
 const HTTP_TIMEOUT = 120_000;
+const BODY_TIMEOUT = 120_000;   // headers can arrive fast while the body stalls
+
+// interruptible sleep, optionally telling the user why it is waiting
+function sleep(ms, signal, onNote) {
+  onNote?.();
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    const onAbort = () => done();
+    const timer = setTimeout(done, ms);
+    if (signal?.aborted) return done();
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// read a body with a deadline: a connection that stops mid-body must not hang
+async function readBody(res, signal) {
+  if (!res.body) return await res.text();
+  const ctrl = new AbortController();
+  const relay = () => ctrl.abort();
+  signal?.addEventListener('abort', relay, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), BODY_TIMEOUT);
+  try {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let raw = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      raw += dec.decode(value, { stream: true });
+      if (raw.length > 8_000_000) { try { await reader.cancel(); } catch {} break; }
+    }
+    raw += dec.decode();
+    return raw;
+  } catch (err) {
+    return '';
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', relay);
+  }
+}
 
 async function request(url, opts, signal) {
   const ctrl = new AbortController();
@@ -71,7 +115,7 @@ function modelHint(status, text) {
   return '';
 }
 
-export async function chat(cfg, messages, tools, signal, onDelta) {
+export async function chat(cfg, messages, tools, signal, onDelta, onNote) {
   const body = { model: cfg.model, messages, temperature: 0.2 };
   if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
   if (cfg.stream === true) body.stream = true;
@@ -101,36 +145,41 @@ export async function chat(cfg, messages, tools, signal, onDelta) {
       // honor Retry-After when the gateway sends it, back off otherwise
       const delay = (!threw && res?.status === 429 ? retryAfterMs(res) : null)
         ?? Math.min(15_000, 1500 * attempt * attempt);
-      await new Promise(r => setTimeout(r, delay));
+      // the wait must be interruptible: Ctrl+C during a 15s sleep used to hang
+      await sleep(delay, signal, () => {
+        const why = threw ? threw.message : 'HTTP ' + res.status;
+        onNote?.(`retry ${attempt + 1}/${ATTEMPTS} in ${Math.round(delay / 1000)}s (${String(why).slice(0, 80)})`);
+      });
+      if (signal?.aborted) throw Object.assign(new Error('stopped by user'), { stopped: true, reason: signal.reason });
     }
   }
   if (!res.ok) {
-    const text = await res.text();
+    const text = (await readBody(res, signal)).slice(0, 4000);
     // provider does not know reasoning_effort: retry once without it
     if (body.reasoning_effort && (res.status === 400 || res.status === 422)) {
       delete body.reasoning_effort;
       delete body.stream;
       const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!retry.ok) {
-        const t = (await retry.text()).slice(0, 200);
+        const t = (await readBody(retry, signal)).slice(0, 200);
         throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status)}${modelHint(retry.status, t)}`);
       }
-      return parseMessage(await readCompletion(retry));
+      return parseMessage(await readCompletion(retry, signal));
     }
     // provider does not stream: fall back to a plain call instead of failing
     if (body.stream && (res.status === 400 || res.status === 404 || res.status === 422)) {
       delete body.stream;
       res = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!res.ok) {
-        const t = (await res.text()).slice(0, 200);
+        const t = (await readBody(res, signal)).slice(0, 200);
         throw new Error(`HTTP ${res.status}: ${t}${httpHint(res.status)}${modelHint(res.status, t)}`);
       }
-      return parseMessage(await readCompletion(res));
+      return parseMessage(await readCompletion(res, signal));
     }
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status)}${modelHint(res.status, text)}`);
   }
   if (body.stream) return readStream(res, onDelta);
-  return parseMessage(await readCompletion(res));
+  return parseMessage(await readCompletion(res, signal));
 }
 
 // SSE stream: accumulate content and tool_calls, emit text deltas as they arrive.
@@ -231,8 +280,8 @@ function firstJsonObject(text) {
   return null;
 }
 
-async function readCompletion(res) {
-  const raw = await res.text();
+async function readCompletion(res, signal) {
+  const raw = await readBody(res, signal);
   // Some routers append stream leftovers to a normal JSON body, with or without
   // a newline ("...}{\n\ndata: [DONE]" or "...}data: [DONE]"), and others stream
   // the whole reply even when stream was not requested. Take the first complete
@@ -269,7 +318,14 @@ async function readCompletion(res) {
 }
 
 function parseMessage(json) {
-  const msg = json.choices?.[0]?.message ?? { role: 'assistant', content: '', tool_calls: [] };
+  const choice = json?.choices?.[0];
+  // a 200 with no usable choice used to look like a finished task with no
+  // output; say what actually came back instead
+  if (!choice || !choice.message || (!choice.message.content && !(choice.message.tool_calls ?? []).length)) {
+    const hint = Array.isArray(json?.choices) ? 'the server returned no message' : 'the response was not in the OpenAI format';
+    throw new Error(`Provider sent an unusable reply (${hint}). Try /model, or check the provider with: ineed provider use <name>`);
+  }
+  const msg = choice.message;
   // surface token usage when the provider returns it (OpenAI-style usage block)
   if (json.usage) msg._usage = {
     input: json.usage.prompt_tokens ?? 0,

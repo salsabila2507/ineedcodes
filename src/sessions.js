@@ -29,6 +29,16 @@ export function saveSession(data) {
   return id;
 }
 
+// /clear used to empty the chat while the saved file kept every turn, which
+// looks like the data was forgotten but is still on disk
+export function deleteSession(id) {
+  if (!id) return false;
+  try {
+    fs.unlinkSync(path.join(DIR, id + '.json'));
+    return true;
+  } catch { return false; }
+}
+
 export function listSessions() {
   try {
     return fs.readdirSync(DIR)

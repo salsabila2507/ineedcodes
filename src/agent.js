@@ -6,6 +6,7 @@ import { fetchUrl, webSearch } from './web.js';
 import { PROC_TOOL_DEFS, runProcTool } from './processes.js';
 import { trunc, gray, cyan, dim } from './ui.js';
 import { getMemoryProvider } from './memory.js';
+import { clampSteps, DEFAULT_MAX_STEPS } from './config.js';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { listSkills } from './skills.js';
@@ -21,7 +22,7 @@ function loadProjectInstructions(cwd) {
   return out.join('\n\n').slice(0, 8_000);
 }
 
-export const MAX_STEPS = 30;
+export const MAX_STEPS = DEFAULT_MAX_STEPS;
 export const MAX_HISTORY_CHARS = 30_000;
 export const MAX_TURNS = 40;
 
@@ -113,16 +114,26 @@ function workerResultText(r) {
   return `Worker ${r.id} [${r.status}]: ${String(r.summary).slice(0, 800)}.${files}${cmds}`;
 }
 
-async function runWorker(cfg, spec, cwd, depth, hooks) {
+async function runWorker(cfg, spec, cwd, depth, hooks, parentSignal) {
   const roleName = ROLES[spec.input.role] ? spec.input.role : 'research';
   const role = ROLES[roleName];
   const objective = String(spec.input.objective ?? '')
     + (spec.input.context ? `\nContext from lead agent: ${String(spec.input.context).slice(0, 1_000)}` : '');
+  // a worker writes files and runs commands like the lead does, so it asks the
+  // same person: empty hooks here used to mean "cannot ask, allow everything"
+  const workerHooks = {
+    onApprove: hooks.onApprove,
+    approved: hooks.approved,
+    onNote: hooks.onNote,
+    onResult: hooks.onResult,
+    onUsage: hooks.onUsage
+  };
   try {
-    const res = await runObjective(cfg, objective, cwd, [], {}, {
+    const res = await runObjective(cfg, objective, cwd, [], workerHooks, {
       depth: depth + 1,
       toolFilter: role.tools,
       worker: { id: spec.id, role: roleName, prompt: role.prompt },
+      parentSignal,
       modelOverride: cfg.models?.[roleName] ?? cfg.models?.worker ?? null
     });
     return { id: spec.id, role: roleName, status: res.aborted ? 'incomplete' : 'completed', summary: res.answer || '(no output)', files: res.changed, commands: res.ran };
@@ -148,6 +159,13 @@ const SPAWN_TOOL = {
 
 export async function runObjective(cfg, objective, cwd, history, hooks = {}, extra = {}) {
   let ctrl = new AbortController();
+  // worker runs are children of the lead: when the lead is stopped (or a steer
+  // arrives) the worker must stop as well, not keep editing in the background
+  if (extra.parentSignal) {
+    const relay = () => ctrl.abort(extra.parentSignal.reason ?? 'parent stopped');
+    if (extra.parentSignal.aborted) relay();
+    else extra.parentSignal.addEventListener('abort', relay, { once: true });
+  }
   hooks.onRunStart?.(ctrl);
   const plan = cfg.mode === 'plan';
   const depth = extra.depth ?? 0;
@@ -240,7 +258,8 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   };
   let steerRestarts = 0;
   try {
-    for (let step = 0; step < MAX_STEPS; step++) {
+    const stepBudget = clampSteps(cfg.maxSteps ?? MAX_STEPS);
+    for (let step = 0; step < stepBudget; step++) {
       // a steer abort must not kill the task: restart the call with the note included
       if (ctrl.signal.aborted && ctrl.signal.reason === 'steer') {
         drainSteerInto();
@@ -254,7 +273,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       let msg;
       try {
         hooks.onThinkingStart?.();
-        msg = await chat(roleCfg, messages, tools, ctrl.signal, hooks.onDelta);
+        msg = await chat(roleCfg, messages, tools, ctrl.signal, hooks.onDelta, hooks.onNote);
         hooks.onThinkingEnd?.();
       } catch (err) {
         hooks.onThinkingEnd?.();
@@ -300,7 +319,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         });
         const runOne = async s => {
           hooks.onAgentStart?.(s.id, s.input);
-          const r = await runWorker(cfg, s, cwd, depth, hooks);
+          const r = await runWorker(cfg, s, cwd, depth, hooks, ctrl.signal);
           hooks.onAgentEnd?.(s.id, r);
           spawnResults.set(s.call.id, r);
         };
@@ -329,9 +348,21 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           result = { output: 'Refused: workers cannot spawn more agents.' };
         } else if (mcpMap.has(call.function?.name)) {
           const m = mcpMap.get(call.function?.name);
-          result = await mcpManager.call(m.server, m.tool, input);
-          hooks.onMCPResult?.(call.function?.name, result.output);
-          resultRendered = true;   // onResult below must not render it twice
+          // an MCP tool can do anything on this machine, so it sits behind the
+          // shell permission, not behind the network one
+          let mcpAllowed = cfg.permShell === 'allow' || hooks.approved?.has('shell') || hooks.approved?.has('mcp');
+          if (!mcpAllowed && canAsk) {
+            const verdict = await hooks.onApprove('shell', 'MCP tool: ' + m.tool, input);
+            if (verdict === 'always') hooks.approved?.add('mcp');
+            mcpAllowed = Boolean(verdict);
+          }
+          if (!mcpAllowed) {
+            result = { output: `Denied: the user did not approve the MCP tool ${m.tool}.` };
+          } else {
+            result = await mcpManager.call(m.server, m.tool, input, ctrl.signal);
+            hooks.onMCPResult?.(call.function?.name, result.output);
+            resultRendered = true;   // onResult below must not render it twice
+          }
         } else if (call.function?.name?.startsWith('git_')) {
           const def = GIT_TOOL_DEFS.find(t => t.name === call.function?.name);
           if (plan) {
@@ -357,14 +388,14 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             if (verdict === 'always') hooks.approved?.add('net');
             if (!verdict) result = { output: 'Denied: the user did not approve network access.' };
           }
-          if (!result) result = await fetchUrl(input.url);
+          if (!result) result = await fetchUrl(input.url, ctrl.signal);
         } else if (call.function?.name === 'web_search') {
           if (cfg.permNet === 'ask' && !hooks.approved?.has('net') && canAsk) {
             const verdict = await hooks.onApprove('net', 'web_search', input);
             if (verdict === 'always') hooks.approved?.add('net');
             if (!verdict) result = { output: 'Denied: the user did not approve network access.' };
           }
-          if (!result) result = await webSearch(cfg, input.query);
+          if (!result) result = await webSearch(cfg, input.query, ctrl.signal);
         } else if (call.function?.name?.startsWith('process_')) {
           if (plan) result = { output: 'Refused: plan mode is read only.' };
           else {
@@ -434,10 +465,15 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             }
           }
         }
-        if (!resultRendered) hooks.onResult?.(result.output);
+        if (!resultRendered) hooks.onResult?.(result.output, call.function?.name);
         messages.push({ role: 'tool', tool_call_id: call.id, content: String(result.output).slice(0, 20_000) });
       }
     }
+  } catch (err) {
+    // a failed task must still say what it managed to do, otherwise the user
+    // cannot tell whether files were half-written
+    err.partial = { changed: [...changed], ran: [...ran], todos: [...todos], usage: { ...usage } };
+    throw err;
   } finally {
     // MCP servers are per-objective child processes: without this every task
     // leaks them until the CLI exits.
@@ -452,6 +488,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
     usage: { ...usage },
     aborted: true,
     stopped,
+    maxSteps: clampSteps(cfg.maxSteps ?? MAX_STEPS),
     stopReason: stopped ? 'user' : 'step_limit'
   };
 }

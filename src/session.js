@@ -6,6 +6,7 @@
 import * as readline from 'node:readline';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { clearConfig, normalize, saveConfig, addProvider, removeProvider, providerNames } from './config.js';
 import { switchProviderLive } from './switch.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
@@ -272,7 +273,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     || process.env.TERM_PROGRAM          // vscode, mintty, wezterm, ...
     || /^xterm|powerShell|pwsh/i.test(term)
     || process.env.ANSICON);
-  const TUI = process.stdout.isTTY && !noColor
+  const TUI = process.stdout.isTTY && process.stdin.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   let sessionId = null;
   let lastBoost = null;
@@ -376,8 +377,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     }
     if (!busy) doExit();
     else {
+      // input closed while work is still going: say what is happening and leave
+      // a nonzero exit code, because the task did NOT finish
+      console.log(yellow('  Input closed while a task is still running.'));
+      console.log(dim('  Waiting up to 30s for it to finish, then stopping. Ctrl+C stops now.'));
       const wait = setInterval(() => { if (!busy) { clearInterval(wait); doExit(); } }, 200);
-      setTimeout(() => { clearInterval(wait); doExit(); }, 30_000);
+      setTimeout(() => {
+        clearInterval(wait);
+        activeRun?.abort();
+        console.log(yellow('  Stopped before the task finished.'));
+        if (TUI) { try { screen.resetRegion(); screen.exit(); } catch {} }
+        process.exit(2);
+      }, 30_000);
     }
   });
 
@@ -399,12 +410,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   function doExit() {
     closed = true;
+    // a killed process must never leave the terminal in alt-screen with a
+    // hidden cursor, so restore it on the way out no matter how we got here
+    try { if (TUI) { screen.resetRegion(); screen.exit(); } } catch {}
     // save whatever happened and hand back the resume code
     let code = null;
     if (history.length) {
       try { code = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
     }
-    if (TUI) { screen.resetRegion(); screen.exit(); }
     console.log(dim('Goodbye.'));
     if (code) {
       console.log('');
@@ -559,7 +572,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       onSteer: list => { for (const s of list) say(T.warning('  ↳ steer: ') + T.text(s)); },
       onApprove: async (cat, name, input2) => {
         stop();
-        say(T.warning('  ⚠ approval needed') + ' ' + T.command(name) + T.muted(' ' + trunc(JSON.stringify(input2), 80)));
+        // show what will actually happen: the path or the command, not a slice of JSON
+        const detail = input2?.command ? String(input2.command)
+          : input2?.url ? String(input2.url)
+          : input2?.path ? String(input2.path)
+          : trunc(JSON.stringify(input2 ?? {}), 90);
+        const overwrites = (name === 'write_file' || name === 'copy_file' || name === 'move_file') && input2?.path
+          && fs.existsSync(path.resolve(process.cwd(), String(input2.path))) ? T.warning('  (overwrites an existing file)') : '';
+        say(T.warning('  ⚠ approval needed') + ' ' + T.command(name) + T.muted(' ' + detail) + overwrites);
         const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
         const c = a.trim().toLowerCase();
         if (c === 's' || c === 'save') {
@@ -612,7 +632,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       if (res.aborted) {
         if (res.stopReason === 'step_limit') {
-          say(T.warning('  ■ Out of steps') + T.muted(` - hit the ${MAX_STEPS} step limit before finishing.`));
+          say(T.warning('  ■ Out of steps') + T.muted(` - hit the ${res.maxSteps ?? MAX_STEPS} step limit before finishing.`));
         } else {
           say(T.warning('  ■ Stopped') + T.muted(' - you interrupted the task.'));
         }
@@ -643,6 +663,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       history = pushTurn(history, input, { answer: '(task failed: ' + err.message + ')' });
       try { sessionId = saveSession({ id: sessionId, cwd: process.cwd(), model: state.model, history }); } catch {}
       say(T.error('  ✗ ' + err.message) + T.muted('  context kept.'));
+      if (err.partial?.changed?.length) say('  ' + T.muted('files already changed: ') + T.text(err.partial.changed.join(', ')));
+      if (err.partial?.ran?.length) say('  ' + T.muted(`commands already run: ${err.partial.ran.length}`) + T.muted(' (last: ') + T.text(trunc(String(err.partial.ran[err.partial.ran.length - 1]), 60)) + T.muted(')'));
+      if (err.partial?.changed?.length) say('  ' + T.muted('look at those files before re-running: a half-finished edit may be there'));
       // model/connection trouble: offer the fix right here instead of making the
       // user remember /model (bounded retries so it can never loop forever)
       const recoverable = !err?.stopped
@@ -836,7 +859,21 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (Number.isInteger(n) && n >= 1 && n <= names.length) return apply(names[n - 1]);
       say(red('  No theme named ' + t + '.'));
     },
-    '/clear': () => { history = []; say(dim('Conversation forgotten.')); }
+    '/clear': async () => {
+      history = [];
+      if (sessionId) {
+        const { deleteSession } = await import('./sessions.js');
+        const answer = (await ask('  Also delete the saved copy on disk? [y/N] ')).trim().toLowerCase();
+        if (answer === 'y' || answer === 'yes') {
+          deleteSession(sessionId);
+          say(dim('Conversation and its saved copy are gone.'));
+        } else {
+          say(dim('Chat cleared here. The saved copy still exists (/resume ' + sessionId + ').'));
+        }
+      } else {
+        say(dim('Conversation forgotten.'));
+      }
+    }
   };
 
     // every dispatch path fires handle() without awaiting it, so it must never
@@ -2000,6 +2037,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   pumpHeld();
 
   screen.enter();
+  // SIGTERM, uncaught exceptions and normal exit all have to give the terminal back
+  const restoreTerminal = () => { try { screen.resetRegion(); screen.exit(); } catch {} };
+  for (const sig of ['SIGTERM', 'SIGHUP', 'uncaughtException']) {
+    process.on(sig, err => {
+      restoreTerminal();
+      if (sig === 'uncaughtException') {
+        console.error(red('  ✗ ' + (err?.message ?? err)));
+        process.exit(1);
+      }
+      process.exit(0);
+    });
+  }
   screen.mouse(true);
   layout({ clear: true });
   // first-open brand block: the ANSI-shadow logo leads the conversation once,
