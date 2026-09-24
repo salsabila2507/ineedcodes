@@ -325,6 +325,16 @@ const DESTRUCTIVE = [
 // Commands that destroy data are never run by the agent: the user does those
 // themselves. Anything merely disruptive (npm install, kill, chmod on a project
 // file) goes through the normal permission prompt instead of a hard block.
+// Reading is side-effect free, so several read calls can run at the same time.
+// Everything that writes, executes, or talks to the network stays in order.
+export const READ_ONLY_TOOLS = new Set(['list_files', 'read_file', 'read_file_range', 'search_text', 'todo']);
+
+export function isReadOnlyTool(name) {
+  if (READ_ONLY_TOOLS.has(name)) return true;
+  const def = GIT_TOOL_DEFS.find(t => t.name === name);
+  return Boolean(def && !def.mutating);
+}
+
 export function isDestructive(command) {
   return DESTRUCTIVE.some(re => re.test(command));
 }

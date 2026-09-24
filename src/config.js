@@ -74,6 +74,8 @@ export function normalize(c) {
     permShell: c.permShell === 'allow' ? 'allow' : 'ask',
     permNet: c.permNet === 'ask' ? 'ask' : 'allow',
     maxSteps: clampSteps(c.maxSteps),
+    maxWorkers: Math.min(8, Math.max(1, Math.floor(Number(c.maxWorkers)) || 4)),
+    parallelReads: Math.min(8, Math.max(1, Math.floor(Number(c.parallelReads)) || 6)),
     models: (c.models && typeof c.models === 'object' && !Array.isArray(c.models))
       ? Object.fromEntries(Object.entries(c.models).map(([k, v]) => [k, String(v)]))
       : {},

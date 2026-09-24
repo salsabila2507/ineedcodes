@@ -1,7 +1,7 @@
 // agent.js: the loop. objective -> reason -> tool call -> observe real result -> repeat -> verify -> report.
 
 import { chat } from './provider.js';
-import { TOOLS, runTool, shellRun, isDestructive, GIT_TOOL_DEFS, runGitTool } from './tools.js';
+import { TOOLS, runTool, shellRun, isDestructive, isReadOnlyTool, GIT_TOOL_DEFS, runGitTool } from './tools.js';
 import { fetchUrl, webSearch } from './web.js';
 import { PROC_TOOL_DEFS, runProcTool } from './processes.js';
 import { trunc, gray, cyan, dim } from './ui.js';
@@ -59,6 +59,9 @@ Rules:
 - Suggest "boost" (isolated git-worktree run) when a task involves major refactoring, repeated failed fixes, or architecture changes, by telling the user to run /boost. Do not start it yourself.
 - Some actions need user approval. A tool result starting with "Denied" means the user said no: do not retry the same call, explain what you wanted instead.
 - For objectives with 3 or more steps, keep a checklist with the todo tool and update statuses as you go (in_progress for what you are doing now).
+- Work in parallel where it is free: when you need several files or facts, request them in ONE message with multiple tool calls, and read-only calls run concurrently. Never wait for one read to finish before asking for the next.
+- Delegate instead of grinding: for a task with independent parts, spawn workers in the same message. research and review workers run in parallel and change nothing; implement and debug workers write, so give them one part at a time. Two research workers beat one worker doing both.
+- Do not spawn a worker for something you can answer with one read yourself, and never spawn a worker to do the task you were given: keep the objective, delegate the parts.
 - A "[steer from the user, newer than the objective]" message is a live steer: it is newer than the original objective. Adapt to it immediately; if it changes direction, change course without redoing finished work.
 - When building web pages or UI: commit to one coherent style; restrained palette (1 primary, 1 accent, neutral background); a real Google Fonts pairing; no emoji as icons (use inline SVG); cursor-pointer on clickables; visible focus states; text contrast at least 4.5:1; responsive at 375, 768, 1024, 1440px; respect prefers-reduced-motion; avoid generic AI purple/pink gradients and default template blue.
 - When the objective is done, verify it (run the tests, read the file back, whatever proves it), then reply with the final result in this shape:
@@ -243,6 +246,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   ];
   const changed = new Set();
   const ran = [];
+  const humanizeWork = [];   // background copy passes, awaited before the final report
   const todos = [];
   const usage = { input: 0, output: 0 };
   let answer = '';
@@ -299,6 +303,8 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
       const calls = msg.tool_calls ?? [];
       if (calls.length === 0) {
+        // last chance to let a background copy pass land before we call it done
+        if (humanizeWork.length) await Promise.allSettled(humanizeWork.splice(0));
         // task finished: store durable knowledge only when something actually
         // changed. Fire-and-forget: awaiting it adds the full icm round-trip
         // (seconds) after the answer, before the user sees "Done"
@@ -323,17 +329,19 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           hooks.onAgentEnd?.(s.id, r);
           spawnResults.set(s.call.id, r);
         };
-        const readonly = specs.filter(s => ROLES[s.role].readonly).slice(0, 4);
+        const maxParallel = Math.min(8, Math.max(1, Number(cfg.maxWorkers) || 4));
+        const readonly = specs.filter(s => ROLES[s.role].readonly).slice(0, maxParallel);
         const writers = specs.filter(s => !ROLES[s.role].readonly);
-        for (let i = 0; i < readonly.length; i += 4) {
-          await Promise.all(readonly.slice(i, i + 4).map(runOne));
+        for (let i = 0; i < readonly.length; i += maxParallel) {
+          await Promise.all(readonly.slice(i, i + maxParallel).map(runOne));
         }
         for (const s of writers) await runOne(s);
       }
 
-      for (const call of calls) {
-        // a stop must cut through: never execute queued tools after an abort
-        if (ctrl.signal.aborted) break;
+      // side-effect free reads run together: a model that asks for five files
+      // in one message gets them in one round trip instead of five. Order is
+      // still respected, because only consecutive reads are grouped.
+      const runOneCall = async call => {
         let input = {};
         try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
         hooks.onTool?.(call.function?.name, input);
@@ -453,20 +461,84 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             if (allowedNow && !plan && isEdit
               && !/^(Refused|Error|Denied)/.test(String(result.output))) {
               changed.add(String(input.path ?? ''));
-              // humanizer pass: prose files only (html/md/txt), code never touched (rule 21)
+              // humanizer pass: prose files only (html/md/txt), code never touched
+              // (rule 21). It is a second model call, so it runs in the
+              // background instead of delaying every write; the result is
+              // awaited once, just before the task reports back.
               if (name === 'write_file' && cfg.humanize !== false) {
                 const abs = path.resolve(cwd, String(input.path ?? ''));
-                try {
-                  const { humanizeFile } = await import('./humanize.js');
-                  const hr = await humanizeFile(cfg, abs, ctrl.signal, { skipModel: false });
-                  if (hr.changed) hooks.onNote?.(`humanized copy in ${String(input.path)}`);
-                } catch {}
+                humanizeWork.push((async () => {
+                  try {
+                    const { humanizeFile } = await import('./humanize.js');
+                    const hr = await humanizeFile(cfg, abs, ctrl.signal, { skipModel: false });
+                    if (hr.changed) hooks.onNote?.(`humanized copy in ${String(input.path)}`);
+                  } catch {}
+                })());
               }
             }
           }
         }
-        if (!resultRendered) hooks.onResult?.(result.output, call.function?.name);
-        messages.push({ role: 'tool', tool_call_id: call.id, content: String(result.output).slice(0, 20_000) });
+        return { output: String(result.output).slice(0, 20_000), resultRendered };
+      };
+
+      const PARALLEL_READS = Math.min(8, Math.max(2, Number(cfg.parallelReads) || 6));
+      const readCache = new Map();
+      const runReadGroup = async group => {
+        const out = new Array(group.length);
+        let next = 0;
+        const take = async () => {
+          while (next < group.length) {
+            const i = next++;
+            if (ctrl.signal.aborted) { out[i] = { output: 'Stopped by the user.' }; continue; }
+            const call = group[i];
+            let input = {};
+            try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
+            // the same read twice in one step is one read
+            const key = call.function?.name + ':' + (input.path ?? '') + ':' + (input.pattern ?? '');
+            if (readCache.has(key)) { out[i] = readCache.get(key); continue; }
+            const r = await runOneCall(call);
+            readCache.set(key, r);
+            out[i] = r;
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(PARALLEL_READS, group.length) }, take));
+        return out;
+      };
+
+      for (let ci = 0; ci < calls.length;) {
+        if (ctrl.signal.aborted) break;
+        const call = calls[ci];
+        const parallelSafe = call.function?.name !== 'spawn_agent'
+          && !spawnResults.has(call.id)
+          && !mcpMap.has(call.function?.name)
+          && !(extra.toolFilter && !extra.toolFilter.includes(call.function?.name))
+          && isReadOnlyTool(call.function?.name);
+        if (!parallelSafe) {
+          const r = await runOneCall(call);
+          if (!r.resultRendered) hooks.onResult?.(r.output, call.function?.name);
+          messages.push({ role: 'tool', tool_call_id: call.id, content: r.output });
+          ci++;
+          continue;
+        }
+        // collect the run of consecutive reads, then fire them together
+        let end = ci;
+        while (end < calls.length) {
+          const c2 = calls[end];
+          const safe2 = c2.function?.name !== 'spawn_agent'
+            && !spawnResults.has(c2.id) && !mcpMap.has(c2.function?.name)
+            && !(extra.toolFilter && !extra.toolFilter.includes(c2.function?.name))
+            && isReadOnlyTool(c2.function?.name);
+          if (!safe2) break;
+          end++;
+        }
+        const group = calls.slice(ci, end);
+        const results = await runReadGroup(group);
+        group.forEach((c3, i) => {
+          const r = results[i] ?? { output: 'Error: no result.' };
+          if (!r.resultRendered) hooks.onResult?.(r.output, c3.function?.name);
+          messages.push({ role: 'tool', tool_call_id: c3.id, content: r.output });
+        });
+        ci = end;
       }
     }
   } catch (err) {

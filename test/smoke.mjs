@@ -120,6 +120,25 @@ function mock(script) {
           else resp = reply('ran echo EVIDENCE-12345 and saw it in output');
           break;
         case 'loop': resp = call('noop', {}); break;
+        case 'parread': {
+          // two reads in one message: both results must come back matched to
+          // their own call, and they must be requested together
+          if (!hadTools) resp = { choices: [{ message: { role: 'assistant', content: null, tool_calls: [
+            { id: 'r1', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'a.txt' }) } },
+            { id: 'r2', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'b.txt' }) } }
+          ] } }] };
+          else resp = reply(joined.includes('alpha one') && joined.includes('beta two') ? 'PARREAD-OK' : 'PARREAD-MIXED-UP: ' + joined.slice(0, 200));
+          break;
+        }
+        case 'parwrite': {
+          // a write and a read in the same message: the read must see the write
+          if (!hadTools) resp = { choices: [{ message: { role: 'assistant', content: null, tool_calls: [
+            { id: 'w1', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ path: 'seq.txt', content: 'written-first' }) } },
+            { id: 'r1', type: 'function', function: { name: 'read_file', arguments: JSON.stringify({ path: 'seq.txt' }) } }
+          ] } }] };
+          else resp = reply(joined.includes('written-first') ? 'SEQ-OK' : 'SEQ-BROKEN: ' + joined.slice(0, 200));
+          break;
+        }
         case 'paste': {
           // proof that a pasted block arrives as ONE objective: both lines have
           // to sit in the same user message, or this never replies
@@ -360,7 +379,7 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 }
 
 // ── CLI basics ──
-{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.9.1'), out); }
+{ const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed 1.10.0'), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('--reset') && out.includes('-h') && out.includes('tanpa slash'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
@@ -529,7 +548,7 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('session: /plan /build toggle', out.includes('read only') && out.includes('real changes.'), out);
   check('session: /reason toggles', out.includes('Reasoning effort: high'), out);
   check('session: exits cleanly', code === 0 && out.includes('Goodbye.'), out);
-  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.9.1'), out);
+  check('session: banner shows ineed', out.includes('ineed') && out.includes('v1.10.0'), out);
   server.close();
 }
 
@@ -1056,6 +1075,23 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
     paste.out.includes('PASTE-ONE-TASK') && !paste.out.includes('PASTE-SPLIT-INTO-TWO')
     && fs.existsSync(pasted) && fs.readFileSync(pasted, 'utf8').includes('line two'),
     paste.out.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').slice(-400));
+  server.close();
+}
+
+// ── orchestration: reads in parallel, writes still in order ──
+{
+  const { server, port } = await mock('parread');
+  const { code, out, work } = await oneShot('parread', 'read both files', {},
+    w => { fs.writeFileSync(path.join(w, 'a.txt'), 'alpha one'); fs.writeFileSync(path.join(w, 'b.txt'), 'beta two'); });
+  check('parallel reads: two reads in one message stay matched to their own call',
+    code === 0 && out.includes('PARREAD-OK'), out.slice(-300));
+  server.close();
+}
+{
+  const { server, port } = await mock('parwrite');
+  const { code, out, work } = await oneShot('parwrite', 'write then read', { permEdit: 'allow' });
+  check('ordering: a write and a read in one message still run in order',
+    code === 0 && out.includes('SEQ-OK') && fs.readFileSync(path.join(work, 'seq.txt'), 'utf8') === 'written-first', out.slice(-300));
   server.close();
 }
 
