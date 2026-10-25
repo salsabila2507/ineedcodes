@@ -1,9 +1,19 @@
-// wizard.js: first open. Asks base URL, API key, then offers real models to pick from. Saved once, never asked again.
+// wizard.js: first open. Bring-your-own-key: pick a normal provider (or paste any
+// OpenAI-compatible base URL), enter your key, then choose a real model. Saved once.
 
 import { fetchModels, chat } from './provider.js';
 import { saveConfig } from './config.js';
-import { BUILTIN, aliasFor } from './builtin.js';
-import { bold, dim, red, yellow, green, cyan, trunc, logo, BANNER, startSpinner } from './ui.js';
+import { aliasFor } from './builtin.js';
+import { bold, dim, red, yellow, green, trunc, logo, BANNER, startSpinner } from './ui.js';
+
+// Common OpenAI-compatible providers offered on first open. You bring the key.
+// Any other endpoint works too: paste a full base URL at the prompt.
+const PROVIDERS = [
+  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
+  { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
+  { name: 'Ollama (local, no key needed)', baseUrl: 'http://localhost:11434/v1' }
+];
 
 export async function testConnection(cfg, signal) {
   // proves reachability + auth + a working chat in one shot
@@ -20,7 +30,7 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   console.log('');
   console.log(BANNER());
   console.log(bold('Welcome!') + dim(' Let\'s connect you to an AI provider. You only do this once.'));
-  console.log(dim('Any OpenAI-compatible API works: OpenAI, OmniRoute, LM Studio, Ollama, vLLM, and more.'));
+  console.log(dim('Bring your own key. Any OpenAI-compatible API works: OpenAI, OpenRouter, Groq, Ollama, LM Studio, vLLM, and more.'));
   console.log('');
 
   // beginners sometimes type session commands (/provider, /model...) into
@@ -33,36 +43,50 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     return false;
   };
 
+  // step 1: choose a provider by number, or paste any OpenAI-compatible base URL.
+  // Enter defaults to the first provider (OpenAI). The built-in ineed.codes
+  // gateway is intentionally NOT offered here: it needs an admin-issued key.
   let baseUrl = '';
+  console.log(bold('1. Pick a provider') + dim(' (type a number, or paste any OpenAI-compatible base URL):'));
+  PROVIDERS.forEach((p, i) => console.log('   ' + (i + 1) + ') ' + p.name + dim('  ' + p.baseUrl)));
+  console.log('   ' + (PROVIDERS.length + 1) + ') ' + 'Other' + dim('  (paste a base URL, e.g. http://localhost:1234/v1)'));
   while (true) {
-    // the built-in gateway is the default answer: beginners only press Enter
-    baseUrl = await ask(`1. API base URL (Enter = ${BUILTIN.baseUrl}): `);
-    if (baseUrl === '') baseUrl = BUILTIN.baseUrl;
-    if (/^https?:\/\//.test(baseUrl)) break;
+    const ans = (await ask(`   Choice (Enter = 1, ${PROVIDERS[0].name}): `)).trim();
+    if (ans === '') { baseUrl = PROVIDERS[0].baseUrl; break; }
+    if (!rejectCommand(ans)) continue;
+    if (/^https?:\/\//.test(ans)) { baseUrl = ans; break; }
+    const n = Number(ans);
+    if (Number.isInteger(n) && n >= 1 && n <= PROVIDERS.length) { baseUrl = PROVIDERS[n - 1].baseUrl; break; }
+    if (Number.isInteger(n) && n === PROVIDERS.length + 1) {
+      const custom = (await ask('   Base URL (must start with http:// or https://): ')).trim();
+      if (/^https?:\/\//.test(custom)) { baseUrl = custom; break; }
+      abortIfEnded();
+      console.log(red('   It must start with http:// or https://'));
+      continue;
+    }
     abortIfEnded();
-    console.log(red('   It must start with http:// or https://'));
+    console.log(red('   Pick a number from the list, or paste a URL starting with http:// or https://'));
   }
 
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:|\/|$)/.test(baseUrl);
   let apiKey = '';
   while (apiKey === '') {
-    const hint = baseUrl === BUILTIN.baseUrl
-      ? dim('  (key from ineed.codes, or paste your own provider key here)')
-      : '';
-    apiKey = await ask('2. API key (input hidden): ' + hint, { secret: true });
+    apiKey = await ask('2. API key (input hidden): ', { secret: true });
     if (apiKey === '') {
+      // local servers (Ollama, LM Studio) accept any value, so let the user pass
+      if (isLocal) { apiKey = 'local'; break; }
       abortIfEnded();
       console.log(red('   API key is required. Paste it and press Enter.'));
-      if (baseUrl === BUILTIN.baseUrl) {
-        console.log(dim('   No key yet? Get one at https://ineed.codes, or use your own provider (OpenAI, Ollama, LM Studio, vLLM, a router).'));
-      }
+      console.log(dim('   Local servers (Ollama, LM Studio) accept any value, e.g. "local".'));
       continue;
     }
     if (!rejectCommand(apiKey)) apiKey = '';
   }
 
-  // the built-in gateway fronts several upstreams, so its models are shown
-  // under one name; a base URL the user typed keeps whatever it sends
-  const modelAlias = aliasFor(baseUrl);
+  // Some gateways front several upstreams and list them as "upstream/model".
+  // modelAlias shows them under one namespace; a base URL the user typed keeps
+  // whatever the provider sends. aliasFor only sets it for the built-in gateway.
+  let modelAlias = aliasFor(baseUrl);
   const probe = { baseUrl, apiKey, model: 'x', modelAlias };
   console.log(dim('\n   Checking connection...'));
   let models = [];
@@ -143,6 +167,7 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
         }
       } else if (/^b/i.test(choice)) {
         baseUrl = await ask('   API base URL: ') || baseUrl;
+        modelAlias = aliasFor(baseUrl);
         console.log(dim('   Testing again...'));
         try { models = await fetchModels({ baseUrl, apiKey, model: 'x', modelAlias }); } catch {}
       } else if (/^s/i.test(choice)) {
@@ -153,9 +178,9 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
 
   if (!save) {
     console.log('');
-    return { baseUrl, apiKey, model };
+    return { baseUrl, apiKey, model, modelAlias };
   }
-  const cfg = saveConfig({ baseUrl, apiKey, model });
+  const cfg = saveConfig({ baseUrl, apiKey, model, modelAlias });
   console.log(green('   Saved to ~/.ineedcodes/config.json. You will not be asked again.'));
   console.log('');
   return cfg;

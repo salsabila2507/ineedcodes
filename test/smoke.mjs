@@ -456,6 +456,22 @@ fs.rmSync(CFG, { recursive: true, force: true });
   server.close();
 }
 
+// ── wizard: BYOK provider menu (number pick, not the built-in gateway) ──
+fs.rmSync(CFG, { recursive: true, force: true });
+{
+  const { server, port } = await mock('default');
+  // pick "Other" (option 5), then paste the mock URL — proves the menu path works
+  // and that the built-in api.ineed.codes gateway is never the default
+  const { code, out } = await run([], { input: `5\nhttp://127.0.0.1:${port}/v1\n${SECRET}\n\n` });
+  check('wizard: provider menu offers OpenAI/OpenRouter/Groq/Ollama/Other',
+    out.includes('Pick a provider') && out.includes('OpenAI') && out.includes('OpenRouter')
+    && out.includes('Groq') && out.includes('Ollama') && out.includes('Other'), out.slice(0, 600));
+  check('wizard: number pick + custom URL saves', code === 0 && out.includes('Saved'), out.slice(-300));
+  check('wizard: built-in gateway is not the Enter default',
+    !out.includes('api.ineed.codes') || !/Enter = https:\/\/api\.ineed\.codes/.test(out), out.slice(0, 400));
+  server.close();
+}
+
 // ── wizard: wrong key then recovery ──
 fs.rmSync(CFG, { recursive: true, force: true });
 {
@@ -958,30 +974,40 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('gated skills: hidden without the keyword', code === 0 && out.includes('GATE-LOCKED'), out.slice(-300));
 }
 
-// ── default developer keyword: "take me to jungle" ──
+// ── developer keyword: no hardcoded default; only a configured keyword unlocks ──
 {
   // sandbox the config dir BEFORE the import: CONFIG_DIR is read at module load,
   // so the real ~/.ineedcodes/keyword cannot leak into this test
   const prevCfg = process.env.INEED_CONFIG_DIR;
+  const prevKw = process.env.INEED_DEV_KEYWORD;
   process.env.INEED_CONFIG_DIR = path.join(TMP, 'kw-cfg');
+  delete process.env.INEED_DEV_KEYWORD;
   try {
-    const { devKeyword, listSkills, DEFAULT_KEYWORD } = await import('../src/skills.js');
-    check('gated skills: default keyword is the jungle phrase', devKeyword() === DEFAULT_KEYWORD && devKeyword() === 'take me to jungle', devKeyword());
-    const on = listSkills(ROOT, 'take me to jungle and run the sqli skill');
-    const off = listSkills(ROOT, 'just review the code please');
-    check('gated skills: jungle phrase activates developer mode', on.some(s => s.gated) && !off.some(s => s.gated),
-      'on=' + on.filter(s => s.gated).length + ' off=' + off.filter(s => s.gated).length);
-    // a custom keyword must add a private path, never disable the jungle phrase
+    // clear the module cache so CONFIG_DIR and env are re-read
+    const skillsUrl = new URL('../src/skills.js', import.meta.url).href;
+    // dynamic import of a fresh path query forces a re-eval in some runners;
+    // here we just call the already-exported functions with env cleared
+    const mod = await import('../src/skills.js');
+    // with neither env nor keyword file, gated skills stay hidden
+    check('gated skills: no default unlock phrase', mod.devKeyword() === '', mod.devKeyword());
+    const off = mod.listSkills(ROOT, 'just review the code please');
+    const stillOff = mod.listSkills(ROOT, 'take me to jungle and run the sqli skill');
+    check('gated skills: hidden without a configured keyword',
+      !off.some(s => s.gated) && !stillOff.some(s => s.gated),
+      'off=' + off.filter(s => s.gated).length + ' phrase=' + stillOff.filter(s => s.gated).length);
+    // a configured keyword (file) unlocks gated skills when present in the objective
     fs.mkdirSync(process.env.INEED_CONFIG_DIR, { recursive: true });
     fs.writeFileSync(path.join(process.env.INEED_CONFIG_DIR, 'keyword'), 'custom-kw-xyz', { mode: 0o600 });
-    check('gated skills: custom keyword and jungle phrase coexist',
-      devKeyword() === 'custom-kw-xyz'
-      && listSkills(ROOT, 'take me to jungle').some(s => s.gated)
-      && listSkills(ROOT, 'secret custom-kw-xyz work').some(s => s.gated),
-      'kw=' + devKeyword());
+    check('gated skills: configured keyword unlocks them',
+      mod.devKeyword() === 'custom-kw-xyz'
+      && mod.listSkills(ROOT, 'secret custom-kw-xyz work').some(s => s.gated)
+      && !mod.listSkills(ROOT, 'no keyword here').some(s => s.gated),
+      'kw=' + mod.devKeyword());
   } finally {
     if (prevCfg === undefined) delete process.env.INEED_CONFIG_DIR;
     else process.env.INEED_CONFIG_DIR = prevCfg;
+    if (prevKw === undefined) delete process.env.INEED_DEV_KEYWORD;
+    else process.env.INEED_DEV_KEYWORD = prevKw;
   }
 }
 
@@ -1321,8 +1347,8 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
 {
   // build a local source repo so the test never touches the network
   const srcRepo = path.join(TMP, 'skills-src');
-  fs.mkdirSync(path.join(srcRepo, 'skills', 'sync-demo-skill'), { recursive: true });
-  fs.writeFileSync(path.join(srcRepo, 'skills', 'sync-demo-skill', 'SKILL.md'),
+  fs.mkdirSync(path.join(srcRepo, 'optional', 'skills-security', 'sync-demo-skill'), { recursive: true });
+  fs.writeFileSync(path.join(srcRepo, 'optional', 'skills-security', 'sync-demo-skill', 'SKILL.md'),
     '---\nname: sync-demo-skill\ndescription: synced skill for tests\ngated: true\n---\nbody');
   spawnSync('git', ['init', '-q', '-b', 'main', srcRepo]);
   spawnSync('git', ['-C', srcRepo, 'add', '-A']);

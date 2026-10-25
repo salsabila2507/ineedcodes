@@ -23,13 +23,21 @@ Works on Linux, macOS, and Windows (PowerShell and cmd). Needs Node.js 20 or new
 
 ## First open
 
+Bring your own key (BYOK). The first run offers a short provider menu; it never silently defaults to a locked gateway.
+
 ```
 $ ineed
 
-Welcome to ineed - let's connect you to an AI provider. You only do this once.
-Any OpenAI-compatible API works: OpenAI, OmniRoute, LM Studio, Ollama, vLLM, and more.
+Welcome! Let's connect you to an AI provider. You only do this once.
+Bring your own key. Any OpenAI-compatible API works: OpenAI, OpenRouter, Groq, Ollama, LM Studio, vLLM, and more.
 
-1. API base URL (example: https://api.openai.com/v1): https://api.openai.com/v1
+1. Pick a provider (type a number, or paste any OpenAI-compatible base URL):
+   1) OpenAI          https://api.openai.com/v1
+   2) OpenRouter      https://openrouter.ai/api/v1
+   3) Groq            https://api.groq.com/openai/v1
+   4) Ollama (local)  http://localhost:11434/v1
+   5) Other           (paste a base URL)
+   Choice (Enter = 1, OpenAI): 1
 2. API key (input hidden): ********
    Connected. 41 models available.
 3. Model id (Enter = gpt-4o-mini):
@@ -37,7 +45,13 @@ Any OpenAI-compatible API works: OpenAI, OmniRoute, LM Studio, Ollama, vLLM, and
    Saved to ~/.ineedcodes/config.json. You will not be asked again.
 ```
 
-Pick your provider, paste your key, choose a model. Done once, never asked again.
+Pick a normal provider, paste your key, choose a model. Done once, never asked again.
+
+For scripts, CI, or a one-off run with no interactive setup:
+
+```bash
+INEED_BASE_URL=https://api.openai.com/v1 INEED_API_KEY=sk-... INEED_MODEL=gpt-4o-mini ineed "fix the tests"
+```
 
 ## Providers
 
@@ -72,15 +86,12 @@ both offer appears once.
 ```
 
 Off by default: without it the model list is exactly what the provider sends.
-The built-in `ineed.codes` gateway sets it for you, because that gateway fronts
-several upstream providers; bring your own base URL and you get no renaming and
-no extra questions in setup.
+If you already have a multi-upstream gateway saved in your config (including a
+pasted `https://api.ineed.codes/v1` URL), `modelAlias` is applied automatically
+for that base URL so its models show under one namespace. First-run setup does
+not default to that gateway; bring your own provider and key.
 
-For scripts, CI, or a one-off run, environment variables override the config file entirely (no config needed):
-
-```bash
-INEED_BASE_URL=https://api.openai.com/v1 INEED_API_KEY=sk-... INEED_MODEL=gpt-4o-mini ineed "fix the tests"
-```
+Environment variables override the config file entirely (no config needed): `INEED_BASE_URL`, `INEED_API_KEY`, `INEED_MODEL`, `INEED_MAX_STEPS`, `INEED_TOKEN_BUDGET`.
 
 ## Use
 
@@ -247,6 +258,21 @@ Instructions for the agent go here.
 
 Project skills override global ones with the same name. List them with `/skills`.
 
+#### Optional security pack
+
+An optional gated security / pentest skill pack lives in this repository under
+[`optional/skills-security/`](optional/skills-security/). It is **not** shipped
+in the npm package, **not** auto-installed, and **not** visible to the agent by
+default.
+
+```bash
+ineed skills-sync     # download the pack into ~/.ineedcodes/skills/
+ineed unlock          # set your own keyword that reveals gated skills
+```
+
+Mention that keyword in a task (or in `/skills`) to reveal them. Use only on
+systems you are authorized to test. See [`optional/skills-security/README.md`](optional/skills-security/README.md).
+
 ### Project instructions
 
 `AGENTS.md` or `.ineedcodes/instructions.md` in your repository loads automatically, every session.
@@ -273,15 +299,11 @@ Restart ineed, and every tool from that server is callable. Check what is loaded
 
 ## Works with any provider
 
-OpenAI, iNeed API, OmniRoute, LM Studio, Ollama, vLLM, Groq, Together, OpenRouter, or anything that speaks the OpenAI format. You bring the key, ineed brings the agent.
-
-## For beginners, by a beginner's journey
-
-This project exists so anyone can start vibecoding: describe what you want, watch the agent work, learn from what it does. Free tutorials and AI resources live at [ineed.web.id](https://ineed.web.id), the product home is [ineed.codes](https://ineed.codes).
+OpenAI, OpenRouter, Groq, Ollama, LM Studio, vLLM, Together, OmniRoute, or anything that speaks the OpenAI format. You bring the key, ineed brings the agent.
 
 ## Contributing
 
-Issues and PRs are welcome at [github.com/salsabila2507/ineedcodes](https://github.com/salsabila2507/ineedcodes).
+Issues and PRs are welcome at [github.com/salsabila2507/ineedcodes](https://github.com/salsabila2507/ineedcodes). Product home: [ineed.codes](https://ineed.codes).
 
 ## License
 

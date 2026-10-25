@@ -32,9 +32,9 @@ const expected = ['LICENSE', 'README.md', 'package.json',
 ];
 const missing = expected.filter(f => !files.includes(f));
 check('tarball has all runtime files', missing.length === 0, 'missing: ' + missing.join(', '));
-check('tarball ships no bundled skills (opt-in via skills-sync)', !files.some(f => f.startsWith('skills/')),
-  'found: ' + files.filter(f => f.startsWith('skills/')).slice(0, 3).join(', '));
-const extra = files.filter(f => !expected.includes(f) && !f.startsWith('skills/'));
+check('tarball ships no bundled skills (opt-in via skills-sync)', !files.some(f => f.startsWith('skills/') || f.startsWith('optional/')),
+  'found: ' + files.filter(f => f.startsWith('skills/') || f.startsWith('optional/')).slice(0, 3).join(', '));
+const extra = files.filter(f => !expected.includes(f) && !f.startsWith('skills/') && !f.startsWith('optional/'));
 check('tarball has no junk', extra.length === 0, 'extra: ' + extra.join(', '));
 
 // 3. install into sandbox prefix

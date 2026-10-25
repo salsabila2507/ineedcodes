@@ -1,9 +1,13 @@
-// builtin.js: the built-in gateway, https://api.ineed.codes (OpenAI-compatible).
-// It is offered as the default base URL on first open, and every model it
-// exposes shows up dynamically via GET /v1/models - the client never hardcodes
-// model ids. The gateway requires a per-user chat-scope API key issued by the
-// admin (keyless/anonymous access is not supported), so the key always comes
-// from the user's own config or the INEED_API_KEY env var - never from here.
+// builtin.js: metadata for the optional built-in gateway, https://api.ineed.codes
+// (OpenAI-compatible). This gateway is NOT the default on first open: it requires a
+// per-user chat-scope API key issued by the admin (keyless/anonymous access is not
+// supported), so beginners bring their own provider instead (see wizard.js).
+//
+// This module is kept so that users who already have the gateway saved in their
+// config, or who paste its base URL by hand, still get the right model namespace.
+// Every model it exposes shows up dynamically via GET /v1/models; the client never
+// hardcodes model ids, and the key always comes from the user's own config or the
+// INEED_API_KEY env var, never from here.
 
 // modelAlias is the one name this gateway's models are shown under. It fronts
 // several upstream providers, so without it the list arrives as "upstream/model"
