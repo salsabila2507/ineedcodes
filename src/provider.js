@@ -171,9 +171,13 @@ function modelHint(status, text) {
   return '';
 }
 
-export async function chat(cfg, messages, tools, signal, onDelta, onNote) {
+// opts.maxTokens caps the reply (the setup test only needs a word or two);
+// opts.attempts lowers the transient-retry count (the setup test fails fast
+// instead of backing off for ~20s on a dead address)
+export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts = {}) {
   await warmAlias(cfg, signal);
   const body = { model: realModelId(cfg), messages, temperature: 0.2 };
+  if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
   if (cfg.stream === true) body.stream = true;
   if (tools?.length) body.tools = tools.map(t => ({
@@ -184,7 +188,7 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote) {
   if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
 
   // transient failures (network errors, 429, 5xx) get retries with backoff; other HTTP answers do not
-  const ATTEMPTS = 4;
+  const ATTEMPTS = Math.max(1, Math.min(4, Number(opts.attempts) || 4));
   let res;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     let threw = null;
@@ -212,6 +216,17 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote) {
   }
   if (!res.ok) {
     const text = (await readBody(res, signal)).slice(0, 4000);
+    // some models refuse max_tokens (they want max_completion_tokens): the cap
+    // is only a nicety, so ask once more without it
+    if (body.max_tokens && (res.status === 400 || res.status === 422) && /max_tokens/i.test(text)) {
+      delete body.max_tokens;
+      const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
+      if (!retry.ok) {
+        const t = (await readBody(retry, signal)).slice(0, 200);
+        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status)}${modelHint(retry.status, t)}`);
+      }
+      return parseMessage(await readCompletion(retry, signal));
+    }
     // provider does not know reasoning_effort: retry once without it
     if (body.reasoning_effort && (res.status === 400 || res.status === 422)) {
       delete body.reasoning_effort;

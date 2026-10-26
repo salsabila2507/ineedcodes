@@ -4,6 +4,7 @@
 
 import { fetchModels } from './provider.js';
 import { normalize, saveConfig } from './config.js';
+import { BUILTIN } from './builtin.js';
 
 // beginner default: a plain general chat model that can also use tools. Ordered
 // by how well they usually behave for coding work, then anything else.
@@ -54,4 +55,27 @@ export async function switchProviderLive(cfg, name, { signal, save = true } = {}
     modelChanged: Boolean(model && model !== wanted),
     modelWasEmpty: !wanted
   };
+}
+
+// the provider itself could not be reached (DNS, refused, offline, dead host).
+// Picking another model at the same address cannot fix that; switching
+// provider can, so the recovery prompt leads with [p] for these.
+export function isUnreachable(message) {
+  return /cannot reach|fetch failed|ENOTFOUND|ECONN|EAI_AGAIN/i.test(String(message ?? ''));
+}
+
+// an old config still pointing at the retired built-in gateway. It is not
+// available, so the session says so once at start (the config stays untouched).
+export function usesBuiltinGateway(cfg) {
+  return String(cfg?.baseUrl ?? '').replace(/\/+$/, '') === BUILTIN.baseUrl;
+}
+
+// the one-line question shown after a failed task. Unreachable provider:
+// [p] goes first, since that is the option that actually helps.
+export function recoveryPrompt({ unreachable = false, lastGood = '' } = {}) {
+  const p = '[p] switch/add provider';
+  const m = '[m] pick another model';
+  const l = lastGood ? ` [l] back to ${lastGood}` : '';
+  const opts = unreachable ? [p, m + l] : [m + l, p];
+  return '  ' + [...opts, '[r] retry', '[Enter] skip'].join(' · ') + ': ';
 }

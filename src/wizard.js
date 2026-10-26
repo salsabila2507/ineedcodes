@@ -5,6 +5,7 @@ import { fetchModels, chat } from './provider.js';
 import { saveConfig } from './config.js';
 import { aliasFor } from './builtin.js';
 import { bold, dim, red, yellow, green, trunc, logo, BANNER, startSpinner } from './ui.js';
+import { canPickInteractive, pickInteractive, takeKeys } from './picker.js';
 
 // Common OpenAI-compatible providers offered on first open. You bring the key.
 // Any other endpoint works too: paste a full base URL at the prompt.
@@ -16,9 +17,59 @@ const PROVIDERS = [
 ];
 
 export async function testConnection(cfg, signal) {
-  // proves reachability + auth + a working chat in one shot
-  const m = await chat(cfg, [{ role: 'user', content: 'Reply with exactly: OK' }], undefined, signal);
+  // proves reachability + auth + a working chat in one shot. Tiny on purpose:
+  // a few reply tokens, no streaming, no backoff retries, so a slow or dead
+  // provider fails fast instead of hanging the setup
+  const m = await chat({ ...cfg, stream: false, reasoning: 'low' }, [{ role: 'user', content: 'Reply with exactly: OK' }], undefined, signal, undefined, undefined, { maxTokens: 16, attempts: 1 });
   return String(m.content ?? '').trim();
+}
+
+// the setup test gets a hard deadline; INEED_TEST_TIMEOUT_MS overrides it (tests)
+export const TEST_TIMEOUT_MS = 20_000;
+const testTimeoutMs = () => Number(process.env.INEED_TEST_TIMEOUT_MS) || TEST_TIMEOUT_MS;
+
+// run the test with a deadline, live elapsed seconds, and (on a terminal) a
+// key to skip it: s or Ctrl+C. Resolves { ok, reply, secs } | { timeout } |
+// { skipped } | { error }.
+export async function timedTest(cfg, { timeoutMs = testTimeoutMs(), interactive = canPickInteractive() } = {}) {
+  const ctrl = new AbortController();
+  let why = '';
+  const started = Date.now();
+  const secs = () => Math.round((Date.now() - started) / 1000);
+  const timer = setTimeout(() => { why = 'timeout'; ctrl.abort('timeout'); }, timeoutMs);
+  const label = () => `   testing ${cfg.model}... ${secs()}s` + (interactive ? '  (press s to skip and save anyway)' : '');
+  let tick = null;
+  if (process.stdout.isTTY) {
+    process.stdout.write('\r' + label());
+    tick = setInterval(() => process.stdout.write('\r' + label()), 500);
+  }
+  const restoreKeys = interactive
+    ? takeKeys((str, key) => {
+        if ((key.ctrl && key.name === 'c') || str === 's' || str === 'S') { why = 'skip'; ctrl.abort('skip'); }
+      })
+    : null;
+  try {
+    const reply = await testConnection(cfg, ctrl.signal);
+    if (why) return why === 'skip' ? { skipped: true } : { timeout: true, secs: secs() };
+    return { ok: true, reply, secs: secs() };
+  } catch (error) {
+    if (why === 'timeout') return { timeout: true, secs: secs() };
+    if (why === 'skip') return { skipped: true };
+    return { error };
+  } finally {
+    clearTimeout(timer);
+    if (tick) clearInterval(tick);
+    if (process.stdout.isTTY) process.stdout.write('\r' + ' '.repeat(Math.min(200, label().length + 2)) + '\r');
+    restoreKeys?.();
+  }
+}
+
+// arrow-key model list on a terminal. Returns the id, '' to fall back to the
+// typed prompt (Esc), and throws the usual "aborted" error on Ctrl+C.
+async function pickModelInteractive(models, initialId) {
+  const r = await pickInteractive(models, { title: 'Model', initial: Math.max(0, models.indexOf(initialId)) });
+  if (r.cancelled) throw Object.assign(new Error('Setup aborted.'), { aborted: true });
+  return r.value ? String(r.value) : '';
 }
 
 export async function wizard(ask, { fromCommand = false, save = true } = {}) {
@@ -114,7 +165,23 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     ?? models.find(m => /flash/i.test(m))
     ?? models.find(m => /mini|fast|small/i.test(m))
     ?? models[0];
+  // [m] during the test: the list again on a terminal, a typed id otherwise
+  const askModel = async current => {
+    if (models.length > 1 && canPickInteractive()) {
+      const picked = await pickModelInteractive(models, current);
+      if (picked && rejectCommand(picked)) return picked;
+    }
+    const m = await ask('   Model id: ');
+    if (m === '') abortIfEnded();
+    return m && rejectCommand(m) ? m : current;
+  };
   let model = '';
+  if (models.length > 1 && canPickInteractive()) {
+    console.log(bold('3. Pick a model') + dim(` (${models.length} available · Esc to type an id)`));
+    const picked = await pickModelInteractive(models, suggest);
+    if (picked && rejectCommand(picked)) model = picked;
+    if (model) console.log('   Model: ' + model);
+  }
   while (model === '') {
     model = await ask('3. Model id' + (suggest ? ` (Enter = ${suggest})` : '') + ': ');
     if (model === '' && suggest) model = suggest;
@@ -129,40 +196,60 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   console.log(dim(`   Testing ${model}...`));
   let saved = false;
   while (!saved) {
-    let testSpin = null;
-    try {
-      testSpin = startSpinner('testing ' + model);
-      const reply = await testConnection({ baseUrl, apiKey, model, modelAlias });
-      testSpin.stop();
-      console.log(green('   Works.') + dim(` Replied: ${trunc(reply, 40)}`));
+    const t = await timedTest({ baseUrl, apiKey, model, modelAlias });
+    if (t.ok) {
+      console.log(green('   Works.') + dim(` Replied in ${t.secs}s: ${trunc(t.reply || '(empty)', 40)}`));
       saved = true;
-    } catch (err) {
-      testSpin?.stop();
-      console.log(red('   Test failed: ' + err.message));
+      continue;
+    }
+    if (t.skipped) {
+      console.log(yellow('   Test skipped. Saving anyway: if it does not answer later, use /model or /provider.'));
+      saved = true;
+      continue;
+    }
+    if (t.timeout) {
+      // a slow or stuck provider: never hang here, let the user decide
+      console.log(yellow(`   No reply after ${t.secs}s. The provider may be slow or this model may not answer.`));
+      const choice = await ask('   [r]etry test, [m]odel, or [s]ave anyway? ');
+      if (choice === '') abortIfEnded();
+      if (/^m/i.test(choice)) model = await askModel(model);
+      else if (/^s/i.test(choice)) saved = true;
+      if (!saved) console.log(dim(`   Testing ${model}...`));
+      continue;
+    }
+    {
+      const err = t.error;
+      console.log(red('   Test failed: ' + (err?.message ?? err)));
       const choice = await ask('   [r]etry key, [m]odel, [l]ist models, [b]ase url, or [s]ave anyway? ');
       if (choice === '') abortIfEnded();
       if (/^r/i.test(choice)) {
         apiKey = await ask('   API key: ', { secret: true });
         if (apiKey === '') abortIfEnded();
       } else if (/^m/i.test(choice)) {
-        const m = await ask('   Model id: ');
-        if (m && rejectCommand(m)) model = m;
+        model = await askModel(model);
         console.log(dim(`   Testing ${model}...`));
       } else if (/^l/i.test(choice)) {
         try {
           const list = await fetchModels({ baseUrl, apiKey, model: 'x' });
           if (list.length === 0) { console.log(yellow('   The server sent no list. Use [m] to type an id.')); continue; }
-          const show = list.slice(0, 15);
-          console.log(dim(`   ${list.length} models available, showing ${show.length}:`));
-          show.forEach((m, i) => console.log('   ' + (i + 1) + '. ' + m));
-          const pick = await ask('   Number or full model id: ');
-          if (pick === '') abortIfEnded();
-          if (rejectCommand(pick)) {
-            const n = Number(pick);
-            model = Number.isInteger(n) && n >= 1 && n <= show.length ? show[n - 1] : pick;
+          if (canPickInteractive()) {
+            console.log(dim(`   ${list.length} models available:`));
+            const picked = await pickModelInteractive(list, model);
+            if (picked && rejectCommand(picked)) model = picked;
+          } else {
+            const show = list.slice(0, 15);
+            console.log(dim(`   ${list.length} models available, showing ${show.length}:`));
+            show.forEach((m, i) => console.log('   ' + (i + 1) + '. ' + m));
+            const pick = await ask('   Number or full model id: ');
+            if (pick === '') abortIfEnded();
+            if (rejectCommand(pick)) {
+              const n = Number(pick);
+              model = Number.isInteger(n) && n >= 1 && n <= show.length ? show[n - 1] : pick;
+            }
           }
           console.log(dim(`   Testing ${model}...`));
         } catch (listErr) {
+          if (listErr?.aborted) throw listErr;
           console.log(red('   Could not list models: ' + listErr.message));
         }
       } else if (/^b/i.test(choice)) {

@@ -33,6 +33,7 @@ const check = (name, ok, detail = '') => {
 function mock(script) {
   let ratelimitHit = false;
   let lastModel = null;
+  let lastBody = null;
   const reply = content => ({ choices: [{ message: { role: 'assistant', content } }] });
   const call = (name, args) => ({
     choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'c' + Math.random().toString(36).slice(2), type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }]
@@ -80,6 +81,11 @@ function mock(script) {
       }
       const parsed = JSON.parse(body || '{}');
       lastModel = parsed.model ?? null;
+      lastBody = parsed;
+      // a provider that accepts the request and then never answers
+      if (script === 'slowchat') return;
+      // a model that refuses max_tokens (wants max_completion_tokens)
+      if (script === 'nomaxtokens' && parsed.max_tokens) return send(400, { error: { message: "Unsupported parameter: 'max_tokens'" } });
       if (script === 'alias') return send(200, reply('ALIAS-OK'));
       const msgs = parsed.messages ?? [];
       const toolResults = msgs.filter(m => m.role === 'tool').map(m => String(m.content ?? ''));
@@ -375,11 +381,12 @@ function mock(script) {
   return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
     server,
     port: server.address().port,
-    get lastModel() { return lastModel; }
+    get lastModel() { return lastModel; },
+    get lastBody() { return lastBody; }
   })));
 }
 
-function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null, typeAt = null } = {}) {
+function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, fakePath = null, memory = false, fresh = false, autoExitMs = null, typeAt = null, env = {} } = {}) {
   return new Promise(resolve => {
     const extraPath = fakePath ? fakePath + path.delimiter + process.env.PATH : process.env.PATH;
     const child = spawn(process.execPath, [CLI, ...args], {
@@ -389,7 +396,8 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
         INEED_TEST_PORT: String(port), INEED_TEST_CFG: JSON.stringify(cfg),
         INEED_NO_MEMORY: memory ? '0' : '1', PATH: extraPath,
         INEED_FRESH: fresh ? '1' : '0',
-        INEED_DEV_KEYWORD: TEST_KEYWORD
+        INEED_DEV_KEYWORD: TEST_KEYWORD,
+        ...env
       }
     });
     let out = '';
@@ -1493,6 +1501,225 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
   check('alias: nama yang bukan alias tidak diubah',
     plainMock.lastModel === 'gpt-4o-mini', 'terkirim=' + plainMock.lastModel);
   plainMock.server.close();
+}
+
+// ── provider recovery: switch/add a provider right where a task failed ──
+{
+  const { isUnreachable, usesBuiltinGateway, recoveryPrompt } = await import(pathToFileURL(path.join(ROOT, 'src', 'switch.js')).href);
+  const { BUILTIN } = await import(pathToFileURL(path.join(ROOT, 'src', 'builtin.js')).href);
+  check('recovery: connection errors count as unreachable',
+    isUnreachable('cannot reach https://api.ineed.codes/v1/chat/completions: fetch failed')
+    && isUnreachable('getaddrinfo ENOTFOUND api.ineed.codes') && isUnreachable('connect ECONNREFUSED 127.0.0.1:1')
+    && !isUnreachable('HTTP 401: bad key'));
+  check('recovery: old gateway config is detected',
+    usesBuiltinGateway({ baseUrl: BUILTIN.baseUrl }) && usesBuiltinGateway({ baseUrl: BUILTIN.baseUrl + '/' })
+    && !usesBuiltinGateway({ baseUrl: 'https://api.openai.com/v1' }));
+  const conn = recoveryPrompt({ unreachable: true });
+  const other = recoveryPrompt({ unreachable: false, lastGood: 'gpt-4o' });
+  check('recovery: unreachable puts [p] first',
+    conn.trim().startsWith('[p] switch/add provider') && conn.includes('[m] pick another model') && conn.includes('[r] retry'), conn);
+  check('recovery: other errors still offer [p] after [m]',
+    other.trim().startsWith('[m] pick another model [l] back to gpt-4o') && other.includes('[p] switch/add provider'), other);
+}
+// first open never offers or defaults to the retired gateway
+fs.rmSync(CFG, { recursive: true, force: true });
+{
+  const { out } = await run([], { input: 'not-a-url\n' });
+  check('wizard: BYOK list only, no ineed gateway', out.includes('OpenAI') && out.includes('OpenRouter')
+    && out.includes('Groq') && out.includes('Ollama') && out.includes('Other') && !/ineed\.codes|ineed\.web/i.test(out), out);
+}
+// old config still on the built-in gateway: a notice at start, config untouched
+{
+  fs.mkdirSync(CFG, { recursive: true });
+  const old = JSON.stringify({ baseUrl: 'https://api.ineed.codes/v1', apiKey: 'old-key', model: 'ineed/glm-5' }, null, 2);
+  fs.writeFileSync(path.join(CFG, 'config.json'), old, { mode: 0o600 });
+  const { code, out } = await run([], { input: '/exit\n' });
+  const after = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('recovery: old gateway config shows a notice with /provider add',
+    code === 0 && out.includes('ineed gateway') && out.includes('not available') && out.includes('/provider add'), out);
+  check('recovery: old gateway config is not deleted', after.baseUrl === 'https://api.ineed.codes/v1' && after.apiKey === 'old-key', JSON.stringify(after));
+}
+// a normal config gets no gateway notice
+{
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'm' }), { mode: 0o600 });
+  const { out } = await run([], { input: '/exit\n' });
+  check('recovery: no gateway notice for your own provider', !out.includes('ineed gateway'), out);
+  // /model on a dead address points at /provider instead of a dead end
+  const m = await run([], { input: '/model\n/exit\n' });
+  check('recovery: /model on unreachable provider suggests /provider',
+    /cannot reach|fetch failed/i.test(m.out) && m.out.includes('/provider add'), m.out.slice(-500));
+}
+// [p] switches to another saved provider, then the task runs again
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: {
+      rusak: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'wrong-key', model: 'mock-mini' },
+      bagus: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }
+    },
+    provider: 'rusak'
+  }, null, 2), { mode: 0o600 });
+  const { code, out } = await run([], { staged: [
+    { when: '', send: 'halo', immediate: true },
+    { when: '[p] switch/add provider', send: 'p' },
+    { when: 'Provider (1-', send: '1' },
+    { when: 'Done', send: '/exit' }
+  ] });
+  const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('recovery: prompt offers [p] switch/add provider', out.includes('[p] switch/add provider'), out.slice(-800));
+  check('recovery: [p] lists other providers and add-new',
+    out.includes('bagus') && out.includes('add a new provider'), out.slice(-800));
+  check('recovery: [p] switches and the task retries to Done',
+    code === 0 && out.includes('Provider: bagus') && out.includes('Done') && saved.provider === 'bagus', out.slice(-800));
+  server.close();
+}
+// [p] with no other provider runs the /provider add wizard, then retries
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'wrong-key', model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { staged: [
+    { when: '', send: 'halo', immediate: true },
+    { when: '[p] switch/add provider', send: 'p' },
+    { when: 'provider name', send: 'mine' },
+    { when: 'Choice (Enter', send: `http://127.0.0.1:${port}/v1` },
+    { when: 'API key', send: SECRET },
+    { when: 'Model id', send: '' },
+    { when: 'Done', send: '/exit' }
+  ] });
+  const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('recovery: [p] adds a new provider and retries to Done',
+    code === 0 && out.includes('Provider "mine" saved and active') && out.includes('Done')
+    && saved.provider === 'mine' && saved.providers.mine.apiKey === SECRET && !!saved.providers.default, out.slice(-800));
+  server.close();
+}
+// unreachable provider (the reported bug): hint + [p] first, then switch works
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({
+    providers: {
+      mati: { baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'k', model: 'mock-mini' },
+      hidup: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }
+    },
+    provider: 'mati'
+  }, null, 2), { mode: 0o600 });
+  const { code, out } = await run([], { staged: [
+    { when: '', send: 'halo', immediate: true },
+    { when: '[p] switch/add provider', send: 'p' },
+    { when: 'Provider (1-', send: 'hidup' },
+    { when: 'Done', send: '/exit' }
+  ] });
+  check('recovery: unreachable shows a hint and leads with [p]',
+    out.includes('cannot be reached') && /\[p\] switch\/add provider · \[m\] pick another model/.test(out), out.slice(-800));
+  check('recovery: unreachable -> [p] by name -> Done',
+    code === 0 && out.includes('Provider: hidup') && out.includes('Done'), out.slice(-800));
+  server.close();
+}
+
+// ── arrow-key model picker (zero deps, fake terminal: no real TTY needed) ──
+{
+  const { EventEmitter } = await import('node:events');
+  const { pickInteractive, filterItems, windowStart, canPickInteractive } = await import(pathToFileURL(path.join(ROOT, 'src', 'picker.js')).href);
+  const fakeTerm = () => {
+    const input = new EventEmitter();
+    input.isTTY = true; input.isRaw = false;
+    input.setRawMode = v => { input.isRaw = v; };
+    input.resume = () => {}; input.pause = () => {}; input.isPaused = () => false;
+    let written = '';
+    const output = { isTTY: true, columns: 80, write: s => { written += s; } };
+    return { input, output, get written() { return written; } };
+  };
+  const key = (t, name, str = undefined, extra = {}) => t.input.emit('keypress', str, { name, ...extra });
+  const models = Array.from({ length: 43 }, (_, i) => 'model-' + String(i + 1).padStart(2, '0'));
+
+  check('picker: filter matches every word, any case', filterItems(['GPT-4o-mini', 'gpt-4o', 'llama-3'], '4o MINI').join() === 'GPT-4o-mini');
+  check('picker: window keeps the selection visible', windowStart(0, 43, 10) === 0 && windowStart(42, 43, 10) === 33 && windowStart(20, 43, 10) === 15 && windowStart(3, 5, 10) === 0);
+  check('picker: pipes are never interactive', !canPickInteractive({ isTTY: false }, { isTTY: false }));
+
+  {
+    const t = fakeTerm();
+    const readlineOwn = () => {};
+    t.input.on('keypress', readlineOwn);
+    const p = pickInteractive(models, { input: t.input, output: t.output, title: 'Model' });
+    const tookOver = t.input.isRaw === true && !t.input.listeners('keypress').includes(readlineOwn);
+    key(t, 'down'); key(t, 'down'); key(t, 'up'); key(t, 'pagedown');
+    key(t, 'return');
+    const r = await p;
+    check('picker: Up/Down/PageDown then Enter picks', r.value === 'model-12', JSON.stringify(r));
+    check('picker: takes keys in raw mode while open', tookOver);
+    check('picker: gives keys and raw mode back after', t.input.isRaw === false && t.input.listeners('keypress').includes(readlineOwn) && t.input.listeners('keypress').length === 1);
+    check('picker: shows a scrolling window, not all 43', t.written.includes('of 43') && !t.written.includes('model-30'), t.written.slice(0, 300));
+  }
+  {
+    const t = fakeTerm();
+    const p = pickInteractive(models, { input: t.input, output: t.output, initial: 40 });
+    for (const c of '07') key(t, undefined, c);
+    key(t, 'return');
+    const r = await p;
+    check('picker: typing filters the list', r.value === 'model-07', JSON.stringify(r));
+  }
+  {
+    const t = fakeTerm();
+    const p = pickInteractive(models, { input: t.input, output: t.output });
+    for (const c of 'my-own-id') key(t, undefined, c);
+    key(t, 'return');
+    const r = await p;
+    check('picker: Enter on no match uses the typed id', r.value === 'my-own-id', JSON.stringify(r));
+  }
+  {
+    const t = fakeTerm();
+    const p = pickInteractive(models, { input: t.input, output: t.output });
+    key(t, 'escape');
+    const esc = await p;
+    const t2 = fakeTerm();
+    const p2 = pickInteractive(models, { input: t2.input, output: t2.output });
+    key(t2, 'c', '\x03', { ctrl: true });
+    const cc = await p2;
+    check('picker: Esc falls back to typing an id', esc.manual === true, JSON.stringify(esc));
+    check('picker: Ctrl+C cancels and restores raw mode', cc.cancelled === true && t2.input.isRaw === false, JSON.stringify(cc));
+  }
+}
+
+// ── setup model test: tiny request, hard timeout, skip ──
+{
+  const { testConnection, timedTest, TEST_TIMEOUT_MS } = await import(pathToFileURL(path.join(ROOT, 'src', 'wizard.js')).href);
+  const m = await mock('default');
+  const reply = await testConnection({ baseUrl: `http://127.0.0.1:${m.port}/v1`, apiKey: SECRET, model: 'mock-mini' });
+  check('test call: tiny non-streaming request',
+    typeof reply === 'string' && m.lastBody?.max_tokens > 0 && m.lastBody.max_tokens <= 32 && !m.lastBody.stream && !m.lastBody.tools,
+    JSON.stringify(m.lastBody).slice(0, 200));
+  m.server.close();
+
+  const nm = await mock('nomaxtokens');
+  let ok2 = false;
+  try { await testConnection({ baseUrl: `http://127.0.0.1:${nm.port}/v1`, apiKey: SECRET, model: 'mock-mini' }); ok2 = true; } catch {}
+  check('test call: model that refuses max_tokens still passes', ok2 && nm.lastBody && !('max_tokens' in nm.lastBody), JSON.stringify(nm.lastBody));
+  nm.server.close();
+
+  check('test call: default deadline is about 20s', TEST_TIMEOUT_MS >= 15_000 && TEST_TIMEOUT_MS <= 30_000);
+  const slow = await mock('slowchat');
+  const t0 = Date.now();
+  const r = await timedTest({ baseUrl: `http://127.0.0.1:${slow.port}/v1`, apiKey: SECRET, model: 'mock-mini' }, { timeoutMs: 800, interactive: false });
+  check('test call: a provider that never answers times out', r.timeout === true && Date.now() - t0 < 5000, JSON.stringify(r));
+  slow.server.closeAllConnections?.();
+  slow.server.close();
+}
+// wizard end to end: stuck provider -> timeout -> [s]ave anyway
+fs.rmSync(CFG, { recursive: true, force: true });
+{
+  const slow = await mock('slowchat');
+  const t0 = Date.now();
+  const { code, out } = await run([], { input: `http://127.0.0.1:${slow.port}/v1\n${SECRET}\n\ns\n/exit\n`, env: { INEED_TEST_TIMEOUT_MS: '1000' } });
+  const saved = fs.existsSync(path.join(CFG, 'config.json')) ? JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8')) : {};
+  check('wizard: stuck test times out and offers retry/model/save',
+    out.includes('No reply after') && out.includes('[r]etry test, [m]odel, or [s]ave anyway'), out.slice(-600));
+  check('wizard: [s]ave anyway after timeout saves the provider',
+    code === 0 && out.includes('Saved') && saved.apiKey === SECRET && Date.now() - t0 < 30_000, out.slice(-400));
+  slow.server.closeAllConnections?.();
+  slow.server.close();
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
