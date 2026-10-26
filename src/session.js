@@ -275,6 +275,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     || process.env.TERM_PROGRAM          // vscode, mintty, wezterm, ...
     || /^xterm|powerShell|pwsh/i.test(term)
     || process.env.ANSICON);
+  // legacy Windows console (conhost, raster/Consolas fonts): several symbols
+  // render as empty boxes there, so plain output swaps them for ASCII
+  const legacyConsole = process.env.INEED_LEGACY_CONSOLE === '1' || (process.platform === 'win32' && !windowsAnsi && Boolean(process.stdout.isTTY));
+  const GLYPHS = [['❯', '>'], ['✓', '+'], ['✗', 'x'], ['⚠', '!'], ['◇', '*'], ['↳', '->'], ['■', '#'], ['▸', '>'], ['○', 'o'], ['…', '...'], ['⎿', '|']];
+  const safeGlyphs = s => (legacyConsole && typeof s === 'string' ? GLYPHS.reduce((t, [a, b]) => t.split(a).join(b), s) : s);
   const TUI = process.stdout.isTTY && process.stdin.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   const workerWork = new Map();   // worker id -> what it is doing right now
@@ -410,12 +415,27 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // the current visual line, print, then redraw the prompt WITH the typed
   // buffer so what the user wrote is always visible. During a task (busy)
   // there is no prompt to protect: print plainly, as tests and pipes expect.
+  //
+  // While a task runs, text typed ahead (a steer) is echoed by readline on the
+  // current line; printing straight after it glued the answer onto the typed
+  // text and left the cursor mid-line. So: whenever readline has something on
+  // screen, wipe ALL of its rows first (prompt + typed text, wrapped or not),
+  // print, then repaint it below. readline's own cursor helpers go through
+  // libuv, which also translates them on legacy Windows consoles.
   const plainSay = lines => {
-    if (closed || rlClosed || busy || !process.stdout.isTTY) return console.log(lines);
-    // ASCII-only wipe: legacy conhost may not translate ANSI escapes, so a
-    // raw \x1b[2K would print as literal garbage there
-    const cols = Math.max(10, (process.stdout.columns || 80) - 1);
-    process.stdout.write('\r' + ' '.repeat(cols) + '\r');
+    lines = safeGlyphs(lines);
+    if (closed || rlClosed || !process.stdout.isTTY) return console.log(lines);
+    const typed = rl.line ?? '';
+    if (busy && !typed) return console.log(lines);   // nothing on the input line to protect
+    try {
+      const { rows } = rl.getCursorPos();
+      readline.cursorTo(process.stdout, 0);
+      if (rows) readline.moveCursor(process.stdout, 0, -rows);
+      readline.clearScreenDown(process.stdout);
+    } catch {
+      const cols = Math.max(10, (process.stdout.columns || 80) - 1);
+      process.stdout.write('\r' + ' '.repeat(cols) + '\r');
+    }
     console.log(lines);
     try { rl._refreshLine?.(); } catch { plainPrompt(); }
   };
@@ -620,7 +640,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     // Compact live status line: "• Working (12s · esc to interrupt)". The tick
     // only repaints that one row, so nothing else on screen can smear.
     const boxSpin = label => {
-      if (!TUI) return startSpinner(label);
+      if (!TUI) {
+        // never paint over text typed ahead; repaint it after the wipe
+        return startSpinner(label, {
+          ascii: legacyConsole,
+          say,
+          hold: () => Boolean(rl.line),
+          onStop: () => { if (rl.line && !rlClosed && !closed) { try { rl._refreshLine?.(); } catch {} } }
+        });
+      }
       startWork(label);
       return { stop: () => {} };
     };
@@ -741,6 +769,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   async function runTask(input, retries = 0) {
     busy = true;
+    // plain terminal: text typed during the task repaints as "  > ..." on its
+    // own line instead of the full session prompt (restored by plainPrompt)
+    if (!TUI && process.stdout.isTTY && !rlClosed) { try { rl.setPrompt('  > '); } catch {} }
     resetStream();
     lastToolName = null;
     runStartedAt = Date.now();
@@ -1548,8 +1579,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (closed || rlClosed) return;   // a closed readline cannot take a prompt
     const branch = currentBranch(process.cwd());
     const tok = usage.input || usage.output ? ` ${usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output} tok` : '';
-    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green('❯')} `);
-    rl.prompt();
+    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green(legacyConsole ? '>' : '❯')} `);
+    // keep the cursor where the user left it: text typed during the task stays
+    // editable at its end instead of new keys landing at the start of it
+    rl.prompt(true);
   };
 
   const printWelcome = () => {

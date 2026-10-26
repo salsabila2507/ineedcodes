@@ -1722,6 +1722,49 @@ fs.rmSync(CFG, { recursive: true, force: true });
   slow.server.close();
 }
 
+// ── a greeting is conversation, not work: no tools offered at all ──
+{
+  const { isChitChat } = await import(pathToFileURL(path.join(ROOT, 'src', 'agent.js')).href);
+  check('chit-chat: greetings and thanks are recognized',
+    ['halo', 'Halo!', 'hi there', 'makasih ya', 'terima kasih banyak', 'selamat pagi', 'apa kabar?'].every(isChitChat));
+  check('chit-chat: real requests and "ok" are not',
+    !['halo, fix the tests', 'hi can you list files', 'ok', 'sip', 'test the app', 'ok now commit', 'halo tolong cek git status'].some(isChitChat));
+  const m = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${m.port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { input: 'halo\n/exit\n' });
+  check('chit-chat: "halo" is sent with no tools and gets a plain reply',
+    code === 0 && m.lastBody && !m.lastBody.tools && out.includes('Done') && !/approval needed|Listing|git status/.test(out),
+    JSON.stringify(m.lastBody?.tools ?? null).slice(0, 80) + ' | ' + out.slice(-300));
+  const sys = String(m.lastBody?.messages?.[0]?.content ?? '');
+  check('chit-chat: system prompt says conversation gets no tool calls', /greetings[^\n]*NO tool calls/i.test(sys), sys.slice(0, 200));
+  m.server.close();
+}
+
+// ── legacy Windows console: symbols conhost cannot draw become ASCII ──
+{
+  const m = await mock('default');
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${m.port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const { code, out } = await run([], { input: 'halo\n/exit\n', env: { INEED_LEGACY_CONSOLE: '1' } });
+  check('legacy console: no box-drawing glyphs in plain output', code === 0 && out.includes('+ Done') && !/[❯✓✗⚠◇↳]/.test(out), out.slice(-300));
+  m.server.close();
+}
+
+// ── git line-ending noise never reaches the user ──
+{
+  const { stripCrlfWarnings, quietGitEnv, shellRun } = await import(pathToFileURL(path.join(ROOT, 'src', 'tools.js')).href);
+  const noisy = "warning: in the working copy of 'src/cli.js', LF will be replaced by CRLF the next time Git touches it\n"
+    + 'warning: LF will be replaced by CRLF in a.txt.\nThe file will have its original line endings in your working directory\n diff --git a/x b/x\n';
+  check('git noise: CRLF warnings are filtered, real output kept', stripCrlfWarnings(noisy) === ' diff --git a/x b/x\n', JSON.stringify(stripCrlfWarnings(noisy)));
+  const e = quietGitEnv({ PATH: 'x' });
+  check('git noise: child git runs with core.safecrlf=false', e.GIT_CONFIG_COUNT === '1' && e.GIT_CONFIG_KEY_0 === 'core.safecrlf' && e.GIT_CONFIG_VALUE_0 === 'false');
+  check('git noise: a user GIT_CONFIG_COUNT is left alone', quietGitEnv({ GIT_CONFIG_COUNT: '2' }).GIT_CONFIG_KEY_0 === undefined);
+  const r = await shellRun('git config core.safecrlf', TMP);
+  check('git noise: shell commands see the setting', /false/.test(r.output), r.output);
+  const ga = fs.existsSync(path.join(ROOT, '.gitattributes')) ? fs.readFileSync(path.join(ROOT, '.gitattributes'), 'utf8') : '';
+  check('git noise: repo pins LF line endings', /\*\s+text=auto\s+eol=lf/.test(ga), ga);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

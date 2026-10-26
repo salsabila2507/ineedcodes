@@ -4,14 +4,28 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
+// Windows checkouts make git print "LF will be replaced by CRLF" on every
+// touch of a file. It is noise, not a problem, so turn the check off for every
+// git this tool starts (its own wrappers and git inside shell commands) and
+// drop any of those lines that still slip through. Env-based git config
+// (git 2.31+) is only added when the user has not set their own.
+export function quietGitEnv(env = process.env) {
+  if (env.GIT_CONFIG_COUNT) return { ...env };
+  return { ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.safecrlf', GIT_CONFIG_VALUE_0: 'false' };
+}
+export function stripCrlfWarnings(text) {
+  return String(text ?? '').replace(/^warning: (in the working copy of '[^']*', )?(LF|CRLF) will be replaced by (CRLF|LF)[^\n]*\n?/gim, '')
+    .replace(/^The file will have its original line endings in your working directory\.?\n?/gim, '');
+}
+
 // ── git wrappers (master prompt #26): structured ops, no remote push without the user ──
 function git(args, cwd) {
   // a hook, a pager or a locked index can hang git forever: bound every call
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', ['-c', 'core.safecrlf=false', ...args], {
     cwd, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 60_000,
-    env: { ...process.env, GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
+    env: { ...quietGitEnv(), GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
   });
-  const out = ((r.stdout ?? '') + (r.stderr ?? '')).trim();
+  const out = stripCrlfWarnings((r.stdout ?? '') + (r.stderr ?? '')).trim();
   if (r.error?.code === 'ETIMEDOUT') return { ok: false, out: 'git timed out after 60s (a hook, a pager, or a lock may be blocking it)' };
   if (r.error) return { ok: false, out: 'git failed: ' + r.error.message };
   return { ok: r.status === 0, out };
@@ -359,7 +373,7 @@ export function shellRun(command, cwd, signal, onProgress) {
   return new Promise(resolve => {
     // detached process group: killing it takes the whole tree down, so a child
     // that ignores SIGKILL cannot keep stdout open and freeze the task
-    const child = spawn(command, { cwd, shell: true, env: { ...process.env, NO_COLOR: '1' }, detached: process.platform !== 'win32' });
+    const child = spawn(command, { cwd, shell: true, env: { ...quietGitEnv(), NO_COLOR: '1' }, detached: process.platform !== 'win32' });
     let out = '';
     let settled = false;
     let timedOut = false;
@@ -377,6 +391,7 @@ export function shellRun(command, cwd, signal, onProgress) {
       clearTimeout(timer);
       clearTimeout(hardTimer);
       signal?.removeEventListener('abort', onAbort);
+      out = stripCrlfWarnings(out);
       const body = out.slice(0, 20_000) + (out.length > 20_000 || truncated ? `\n[output truncated: ${out.length} bytes total]` : '');
       resolve({ output: `exit code: ${timedOut ? 'timeout' : child.exitCode}\n${body}` });
     };

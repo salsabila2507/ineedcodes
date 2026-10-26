@@ -2,6 +2,7 @@
 // long commands, list them, tail their logs, stop them. Zero dependencies.
 
 import { spawn } from 'node:child_process';
+import { quietGitEnv } from './tools.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -91,7 +92,7 @@ export function runProcTool(name, input, cwd = process.cwd()) {
         shell: true,
         detached: process.platform !== 'win32',
         stdio: ['ignore', out, out],
-        env: { ...process.env, NO_COLOR: '1' }
+        env: { ...quietGitEnv(), NO_COLOR: '1' }
       });
     } catch (err) {
       fs.closeSync(out);
