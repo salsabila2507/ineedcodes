@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -1388,8 +1388,8 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
 
 // ── model alias: one namespace for a multi-provider gateway ──
 {
-  const { buildModelAlias, fetchModels } = await import(path.join(ROOT, 'src', 'provider.js'));
-  const { normalize, defaultModelAlias } = await import(path.join(ROOT, 'src', 'config.js'));
+  const { buildModelAlias, fetchModels } = await import(pathToFileURL(path.join(ROOT, 'src', 'provider.js')).href);
+  const { normalize, defaultModelAlias } = await import(pathToFileURL(path.join(ROOT, 'src', 'config.js')).href);
 
   const upstream = [
     'ineed/glm-5.3-flash', 'ineed/deepseek-v4.1-flash', 'ineed/kimi-k2.6',
@@ -1420,7 +1420,7 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
   check('alias: aktif kalau diminta di config', cfgOn.modelAlias === 'mine', cfgOn.modelAlias);
 
   // hanya gateway bawaan yang membawa nama tampilan, tanpa pertanyaan tambahan
-  const { BUILTIN, aliasFor } = await import(path.join(ROOT, 'src', 'builtin.js'));
+  const { BUILTIN, aliasFor } = await import(pathToFileURL(path.join(ROOT, 'src', 'builtin.js')).href);
   check('alias: gateway bawaan memakai satu nama, URL lain tidak',
     aliasFor(BUILTIN.baseUrl) === 'ineed'
     && aliasFor('https://api.openai.com/v1') === ''
@@ -1467,7 +1467,7 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
   const shown = await fetchModels(state);
   check('alias: /model hanya menampilkan namespace ineed',
     shown.includes('ineed/grok-4.6') && !shown.some(m => m.startsWith('jerouterv2/')), shown.join(', '));
-  const { chat } = await import(path.join(ROOT, 'src', 'provider.js'));
+  const { chat } = await import(pathToFileURL(path.join(ROOT, 'src', 'provider.js')).href);
   await chat(state, [{ role: 'user', content: 'hi' }], null, undefined, () => {}, () => {});
   check('alias: request dikirim memakai nama asli',
     aliasMock.lastModel === 'jerouterv2/grok-4.6', 'terkirim=' + aliasMock.lastModel);

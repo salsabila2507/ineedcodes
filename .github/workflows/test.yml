@@ -23,6 +23,11 @@ jobs:
         run: node --check src/cli.js
       - name: test
         run: npm test
-      - name: real terminal test (pty)
-        if: runner.os != 'Windows'
+      # util-linux (Linux) and BSD (macOS) ship incompatible `script` CLIs.
+      # Windows has no pty helper here; the in-suite smoke test already covers TTY when available.
+      - name: real terminal test (pty, linux)
+        if: runner.os == 'Linux'
         run: script -qec "node src/cli.js --version" /dev/null
+      - name: real terminal test (pty, macos)
+        if: runner.os == 'macOS'
+        run: script -q /dev/null node src/cli.js --version
