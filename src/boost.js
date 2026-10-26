@@ -4,14 +4,15 @@
 import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { quietGitEnv, stripCrlfWarnings } from './tools.js';
 
 function git(args, cwd) {
   // bounded and non-interactive: a hook, a pager or a lock must not hang a boost
-  const r = spawnSync('git', args, {
+  const r = spawnSync('git', ['-c', 'core.safecrlf=false', ...args], {
     cwd, encoding: 'utf8', timeout: 60_000,
-    env: { ...process.env, GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
+    env: { ...quietGitEnv(), GIT_PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' }
   });
-  const out = ((r.stdout ?? '') + (r.stderr ?? '')).trim();
+  const out = stripCrlfWarnings((r.stdout ?? '') + (r.stderr ?? '')).trim();
   if (r.error?.code === 'ETIMEDOUT') return { ok: false, out: 'git timed out after 60s' };
   if (r.error) return { ok: false, out: 'git failed: ' + r.error.message };
   return { ok: r.status === 0, out };

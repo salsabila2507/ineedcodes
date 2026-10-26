@@ -8,11 +8,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { clearConfig, normalize, saveConfig, addProvider, removeProvider, providerNames } from './config.js';
-import { switchProviderLive } from './switch.js';
+import { switchProviderLive, isUnreachable, usesBuiltinGateway, recoveryPrompt } from './switch.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
 import { fetchModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
 import { wizard } from './wizard.js';
+import { canPickInteractive, pickInteractive } from './picker.js';
 import { getMemoryProvider, ICMAdapter } from './memory.js';
 import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
@@ -274,6 +275,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     || process.env.TERM_PROGRAM          // vscode, mintty, wezterm, ...
     || /^xterm|powerShell|pwsh/i.test(term)
     || process.env.ANSICON);
+  // legacy Windows console (conhost, raster/Consolas fonts): several symbols
+  // render as empty boxes there, so plain output swaps them for ASCII
+  const legacyConsole = process.env.INEED_LEGACY_CONSOLE === '1' || (process.platform === 'win32' && !windowsAnsi && Boolean(process.stdout.isTTY));
+  const GLYPHS = [['❯', '>'], ['✓', '+'], ['✗', 'x'], ['⚠', '!'], ['◇', '*'], ['↳', '->'], ['■', '#'], ['▸', '>'], ['○', 'o'], ['…', '...'], ['⎿', '|']];
+  const safeGlyphs = s => (legacyConsole && typeof s === 'string' ? GLYPHS.reduce((t, [a, b]) => t.split(a).join(b), s) : s);
   const TUI = process.stdout.isTTY && process.stdin.isTTY && !noColor
     && (state.tui === true || (state.tui === null && (process.platform !== 'win32' || windowsAnsi)));
   const workerWork = new Map();   // worker id -> what it is doing right now
@@ -409,12 +415,27 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // the current visual line, print, then redraw the prompt WITH the typed
   // buffer so what the user wrote is always visible. During a task (busy)
   // there is no prompt to protect: print plainly, as tests and pipes expect.
+  //
+  // While a task runs, text typed ahead (a steer) is echoed by readline on the
+  // current line; printing straight after it glued the answer onto the typed
+  // text and left the cursor mid-line. So: whenever readline has something on
+  // screen, wipe ALL of its rows first (prompt + typed text, wrapped or not),
+  // print, then repaint it below. readline's own cursor helpers go through
+  // libuv, which also translates them on legacy Windows consoles.
   const plainSay = lines => {
-    if (closed || rlClosed || busy || !process.stdout.isTTY) return console.log(lines);
-    // ASCII-only wipe: legacy conhost may not translate ANSI escapes, so a
-    // raw \x1b[2K would print as literal garbage there
-    const cols = Math.max(10, (process.stdout.columns || 80) - 1);
-    process.stdout.write('\r' + ' '.repeat(cols) + '\r');
+    lines = safeGlyphs(lines);
+    if (closed || rlClosed || !process.stdout.isTTY) return console.log(lines);
+    const typed = rl.line ?? '';
+    if (busy && !typed) return console.log(lines);   // nothing on the input line to protect
+    try {
+      const { rows } = rl.getCursorPos();
+      readline.cursorTo(process.stdout, 0);
+      if (rows) readline.moveCursor(process.stdout, 0, -rows);
+      readline.clearScreenDown(process.stdout);
+    } catch {
+      const cols = Math.max(10, (process.stdout.columns || 80) - 1);
+      process.stdout.write('\r' + ' '.repeat(cols) + '\r');
+    }
     console.log(lines);
     try { rl._refreshLine?.(); } catch { plainPrompt(); }
   };
@@ -447,6 +468,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     catch (err) {
       if (op.signal.aborted) { say(T.muted('   cancelled.')); return; }
       say(red('   ' + err.message));
+      // the model list lives at the same unreachable address: another model
+      // cannot help, another provider can
+      if (isUnreachable(err.message)) say(T.muted('   this provider cannot be reached. Switch or add one: ') + T.text('/provider') + T.muted(' · ') + T.text('/provider add'));
       return;
     } finally { if (activeOp === op) activeOp = null; }
     if (models.length === 0) {
@@ -465,6 +489,16 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const idx = await pickFromList(ordered);
       if (idx !== null) chosen = ordered[idx];
       else return;   // Esc on the picker cancels, no second prompt
+    }
+    // plain REPL on a real terminal (legacy Windows console, "tui": false):
+    // arrow keys + type-to-filter. Esc falls back to the numbered prompt below
+    if (chosen === null && canPickInteractive()) {
+      const r = await pickInteractive(ordered, { title: 'Model', initial: Math.max(0, ordered.indexOf(state.model)) });
+      if (r.cancelled) { say(T.muted('   cancelled.')); return; }
+      if (r.value) {
+        if (!ordered.includes(r.value) && !/^[A-Za-z0-9._:\/-]{1,120}$/.test(r.value)) { say(red('   That does not look like a model id.')); return; }
+        chosen = r.value;
+      }
     }
     if (chosen === null) {
       // plain REPL: the numbered list must actually be visible to pick from
@@ -487,6 +521,86 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     try { saveConfig(state); } catch {}
     say(green('   Model: ' + state.model));
     if (TUI) drawStatus();
+  }
+
+  // switch to a saved provider (by name), pulling its live model list.
+  // Shared by /provider and the recovery prompt. Returns true when it switched.
+  async function switchToProvider(pick) {
+    if (!pick || !state.providers[pick]) {
+      say(red(`  No provider named ${pick || '(empty)'}.`) + T.muted('  choices: ' + (providerNames(state).join(', ') || '(none yet)')));
+      return false;
+    }
+    const wasBusy = busy;
+    busy = true;
+    say(T.muted('   fetching the model list from ' + state.providers[pick].baseUrl + '...'));
+    try {
+      const r = await switchProviderLive(state, pick, { signal: activeRun?.signal });
+      if (!r.ok) { say(red('  ' + r.error)); return false; }
+      Object.assign(state, normalize(r.cfg));
+      say(green('  Provider: ' + state.provider) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
+      if (r.modelChanged) say(T.muted('   old model is not in that catalog, now using: ') + T.text(r.model));
+      if (r.fetchError) {
+        say(yellow('   Could not fetch the model list: ' + r.fetchError));
+        say(T.muted('   try again: /provider ' + state.provider));
+      } else if (r.models.length > 1) {
+        say(T.muted('   want another model? type: /model'));
+      }
+      return true;
+    } catch (err) {
+      say(red('  Could not switch provider: ' + (err.message ?? err)));
+      return false;
+    } finally {
+      busy = wasBusy;
+      if (TUI) drawStatus();
+    }
+  }
+
+  // the /provider add flow: same wizard as first open (bring your own key),
+  // saved as a named provider and made active. Returns true when saved.
+  async function addProviderFlow(name) {
+    name = String(name ?? '').trim() || (await ask('   provider name (e.g. openai, local): ')).trim();
+    if (!name) return false;
+    const wasBusy = busy;
+    busy = true;
+    try {
+      say(dim(`   Setting up provider "${name}"...`));
+      const prof = await wizard(ask, { fromCommand: true, save: false });
+      const next = addProvider(state, name, prof);
+      if (!next) throw new Error('could not save the provider');
+      Object.assign(state, normalize(next));   // addProvider already saved it
+      say(green(`   Provider "${name}" saved and active.`) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
+      if (TUI) drawStatus();
+      return true;
+    } catch {
+      say(red('   Setup aborted. Nothing changed.'));
+      return false;
+    } finally { busy = wasBusy; }
+  }
+
+  // recovery [p]: pick another saved provider or add a new one, right where
+  // the task failed. Returns true when the active provider changed.
+  async function recoverProvider() {
+    const others = providerNames(state).filter(n => n !== state.provider);
+    if (!others.length) {
+      say(T.muted('   no other provider saved yet: let\'s add one (bring your own key).'));
+      return addProviderFlow('');
+    }
+    say(T.muted('   ── switch provider ──'));
+    others.forEach((n, i) => {
+      const p = state.providers[n];
+      say('   ' + T.muted(String(i + 1) + '. ') + T.text(n) + T.muted('  ' + p.baseUrl + '  model: ' + (p.model || '(none)')));
+    });
+    say('   ' + T.muted(String(others.length + 1) + '. ') + T.text('add a new provider'));
+    const t = (await ask(`   Provider (1-${others.length + 1} or name, Enter = cancel): `)).trim();
+    if (!t) return false;
+    const low = t.toLowerCase();
+    if (low === 'add' || low === 'new' || t === String(others.length + 1)) return addProviderFlow('');
+    if (/^\d+$/.test(t)) {
+      const pick = others[Number(t) - 1];
+      if (!pick) { say(red(`   No provider number ${t}. Pick 1-${others.length + 1}.`)); return false; }
+      return switchToProvider(pick);
+    }
+    return switchToProvider(t);
   }
 
   let lastStreamedForHooks = '';
@@ -526,7 +640,15 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     // Compact live status line: "• Working (12s · esc to interrupt)". The tick
     // only repaints that one row, so nothing else on screen can smear.
     const boxSpin = label => {
-      if (!TUI) return startSpinner(label);
+      if (!TUI) {
+        // never paint over text typed ahead; repaint it after the wipe
+        return startSpinner(label, {
+          ascii: legacyConsole,
+          say,
+          hold: () => Boolean(rl.line),
+          onStop: () => { if (rl.line && !rlClosed && !closed) { try { rl._refreshLine?.(); } catch {} } }
+        });
+      }
       startWork(label);
       return { stop: () => {} };
     };
@@ -647,6 +769,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   async function runTask(input, retries = 0) {
     busy = true;
+    // plain terminal: text typed during the task repaints as "  > ..." on its
+    // own line instead of the full session prompt (restored by plainPrompt)
+    if (!TUI && process.stdout.isTTY && !rlClosed) { try { rl.setPrompt('  > '); } catch {} }
     resetStream();
     lastToolName = null;
     runStartedAt = Date.now();
@@ -728,10 +853,20 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (recoverable) {
         stopWork();
         if (TUI) drawInputBox();
-        const hint = state.lastGood && state.lastGood !== state.model ? ` [l] back to ${prettyModel(state.lastGood)}` : '';
-        const a = (await ask(`  [m] pick another model${hint} · [r] retry · [Enter] skip: `)).trim().toLowerCase();
+        const unreachable = isUnreachable(err?.message);
+        if (unreachable) {
+          say(yellow('  This provider cannot be reached (' + (state.baseUrl || 'no address') + ').')
+            + T.muted(' Press p to switch to another provider or add your own key.'));
+        }
+        const lastGood = state.lastGood && state.lastGood !== state.model ? prettyModel(state.lastGood) : '';
+        const a = (await ask(recoveryPrompt({ unreachable, lastGood }))).trim().toLowerCase();
         // awaited so finally does not clear busy/activeRun while the retry runs
         if (a === 'm') { await pickModel(); retrying = true; return await runTask(input, retries + 1); }
+        if (a === 'p') {
+          const changed = await recoverProvider();
+          if (changed) { retrying = true; return await runTask(input, retries + 1); }
+          say(T.muted('  provider unchanged. Later: /provider or /provider add'));
+        }
         if (a === 'l' && state.lastGood && state.lastGood !== state.model) {
           Object.assign(state, normalize({ ...state, model: state.lastGood }));
           try { saveConfig(state); } catch {}
@@ -1027,30 +1162,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const names = providerNames(state);
       const switchTo = async name => {
         const pick = /^\d+$/.test(name) ? names[Number(name) - 1] : name;
-        if (!pick || !state.providers[pick]) {
+        if (!pick) {
           say(red(`  No provider named ${name || '(empty)'}.`) + T.muted('  choices: ' + (names.join(', ') || '(none yet)')));
           return;
         }
-        busy = true;
-        say(T.muted('   fetching the model list from ' + state.providers[pick].baseUrl + '...'));
-        try {
-          const r = await switchProviderLive(state, pick, { signal: activeRun?.signal });
-          if (!r.ok) { say(red('  ' + r.error)); return; }
-          Object.assign(state, normalize(r.cfg));
-          say(green('  Provider: ' + state.provider) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
-          if (r.modelChanged) say(T.muted('   old model is not in that catalog, now using: ') + T.text(r.model));
-          if (r.fetchError) {
-            say(yellow('   Could not fetch the model list: ' + r.fetchError));
-            say(T.muted('   try again: /provider ' + state.provider));
-          } else if (r.models.length > 1) {
-            say(T.muted('   want another model? type: /model'));
-          }
-        } catch (err) {
-          say(red('  Could not switch provider: ' + (err.message ?? err)));
-        } finally {
-          busy = false;
-          if (TUI) drawStatus();
-        }
+        await switchToProvider(pick);
       };
       if (!arg) {
         say(T.muted('  ── providers ──'));
@@ -1079,19 +1195,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         return;
       }
       if (head === 'add' || head === 'new') {
-        const name = (parts[1] ?? '').trim() || (await ask('   provider name (e.g. openai, local): ')).trim();
-        if (!name) return;
         busy = true;
-        try {
-          say(dim(`   Setting up provider "${name}"...`));
-          const prof = await wizard(ask, { fromCommand: true, save: false });
-          const next = addProvider(state, name, prof);
-          if (!next) throw new Error('could not save the provider');
-          Object.assign(state, normalize(next));
-          say(green(`   Provider "${name}" saved and active.`) + T.muted('  ' + state.baseUrl + '  model: ' + state.model));
-          if (TUI) drawStatus();
-        } catch { say(red('   Setup aborted. Nothing changed.')); }
-        busy = false;
+        try { await addProviderFlow(parts[1] ?? ''); } finally { busy = false; }
         return afterTask();
       }
       await switchTo(arg);   // bare name or number switches
@@ -1474,8 +1579,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (closed || rlClosed) return;   // a closed readline cannot take a prompt
     const branch = currentBranch(process.cwd());
     const tok = usage.input || usage.output ? ` ${usage.output >= 1000 ? (usage.output / 1000).toFixed(1) + 'k' : usage.output} tok` : '';
-    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green('❯')} `);
-    rl.prompt();
+    rl.setPrompt(`\n[${mode}/${state.reasoning}] ${bold(green('ineed'))}${branch ? ' ' + gray('(' + branch + ')') : ''}${tok} ${green(legacyConsole ? '>' : '❯')} `);
+    // keep the cursor where the user left it: text typed during the task stays
+    // editable at its end instead of new keys landing at the start of it
+    rl.prompt(true);
   };
 
   const printWelcome = () => {
@@ -1494,6 +1601,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
             + (state.permEdit === 'ask' || state.permShell === 'ask' ? dim(' Edits and shell ask first: /perm auto to relax.') : '')
         ];
     for (const l of lines) say(l);
+    // an old config may still point at the retired built-in gateway: say so
+    // instead of letting the first task fail with "fetch failed" four times.
+    // The config itself is left alone.
+    if (usesBuiltinGateway(state)) {
+      say(yellow('  The ineed gateway (' + state.baseUrl + ') is not available.')
+        + ' Bring your own key: ' + bold('/provider add') + dim(' (or /provider to switch to a saved one)'));
+    }
   };
 
   // ── plain REPL mode (pipes, tests, NO_COLOR) ──

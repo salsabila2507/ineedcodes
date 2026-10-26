@@ -197,25 +197,32 @@ export function box(lines, colorFn = t => t) {
 const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 // Spinner for TTYs only. In pipes and tests it becomes a no-op.
-export function startSpinner(text = 'thinking') {
+// opts.hold(): while it returns true the spinner does not repaint (the user is
+// typing on that line); opts.ascii uses frames every console font can show
+export function startSpinner(text = 'thinking', opts = {}) {
   // NO_COLOR only removes colors, never progress: a long task must not look
   // frozen in a pipe, a log file, or a terminal with colors turned off
   if (!process.stdout.isTTY) return { stop: () => {} };
   if (process.env.NO_COLOR) {
-    process.stdout.write(`... ${text}\n`);
+    // opts.say prints around text typed ahead instead of gluing onto it
+    if (opts.say) opts.say(`... ${text}`);
+    else process.stdout.write(`... ${text}\n`);
     return { stop() {} };
   }
   let i = 0;
   let stopped = false;
-  const line = () => `\r${tAccent(SPIN_FRAMES[i++ % SPIN_FRAMES.length])} ${tMuted(text + '...')}  `;
-  process.stdout.write(line());
-  const iv = setInterval(() => process.stdout.write(line()), 90);
+  const frames = opts.ascii ? ['|', '/', '-', '\\'] : SPIN_FRAMES;
+  const held = () => { try { return Boolean(opts.hold?.()); } catch { return false; } };
+  const line = () => `\r${tAccent(frames[i++ % frames.length])} ${tMuted(text + '...')}  `;
+  if (!held()) process.stdout.write(line());
+  const iv = setInterval(() => { if (!held()) process.stdout.write(line()); }, 90);
   return {
     stop() {
       if (stopped) return;
       stopped = true;
       clearInterval(iv);
       process.stdout.write('\r' + ' '.repeat(plain(text).length + 20) + '\r');
+      opts.onStop?.();
     }
   };
 }

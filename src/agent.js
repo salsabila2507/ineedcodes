@@ -48,6 +48,7 @@ export function slimToolResults(messages, budget = TOOL_CONTEXT_BUDGET) {
 
 const SYSTEM = `You are ineed, an autonomous terminal agent on the user's machine.
 Rules:
+- Conversation first: greetings, thanks, small talk, and questions you can answer from what you know or from this conversation get a short, friendly, direct reply with NO tool calls. Do not list files, run git, or inspect the project unless the user asks you to do, change, check, or look at something.
 - Use the tools to do real work. Never invent output. Every success claim needs evidence from a tool result.
 - Prefer targeted edits (edit_file) over full rewrites (write_file). Work only inside the current folder.
 - Scope discipline: never explore outside the working folder (no listing the home directory, no scanning drives, no cloning repos) unless the user explicitly names those paths in the current objective. If the task needs it, ask first.
@@ -163,6 +164,17 @@ const SPAWN_TOOL = {
   allowedInPlan: true
 };
 
+// A bare greeting or thanks ("halo", "hi", "makasih") is conversation,
+// not work: it gets a plain reply and no tools at all, so a "halo" can never
+// end in git status and an approval prompt. Deliberately tiny: anything with a
+// real request in it (a path, a verb, a question about the code) is not matched,
+// and neither is "ok"/"sip": after "shall I go ahead?" that means yes, do it.
+const CHITCHAT = /^(?:h(?:a|e)ll?o+|hai+|hi+|hey+|halo+|yo+|hola|hallo+|p(?:agi|ing)|siang|sore|malam|selamat (?:pagi|siang|sore|malam)|good (?:morning|afternoon|evening|night)|assalamu'?alaikum|apa kabar|how are you|what'?s up|sup|thanks?|thank you|thx|ty|makasih|terima ?kasih|trims)(?:\s+(?:bro|bang|kak|gan|min|guys|ineed|there|all|ya|yah|dong|banget|semua|lagi|juga|bos|boss|sis|om|mas|mbak|sayang|again|so much|a lot|lot|very much|banyak|ya))*[\s!.?~,]*$/i;
+export function isChitChat(objective) {
+  const t = String(objective ?? '').trim().replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/gu, '').trim();
+  return t.length > 0 && t.length <= 40 && CHITCHAT.test(t);
+}
+
 export async function runObjective(cfg, objective, cwd, history, hooks = {}, extra = {}) {
   let ctrl = new AbortController();
   // worker runs are children of the lead: when the lead is stopped (or a steer
@@ -181,13 +193,16 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   // background process tools (build mode only)
   if (!plan) tools.push(...PROC_TOOL_DEFS);
   if (extra.toolFilter) tools = tools.filter(t => (extra.toolFilter).includes(t.name));
+  // plain greeting at the top level: answer it, touch nothing
+  const chitChat = !extra.worker && (extra.depth ?? 0) === 0 && isChitChat(objective);
+  if (chitChat) tools = [];
   const canAsk = typeof hooks.onApprove === 'function';
   const roleCfg = extra.modelOverride ? { ...cfg, model: extra.modelOverride } : cfg;
 
   // MCP: load configured servers once per top-level objective, expose their tools
   let mcpManager = null;
   const mcpMap = new Map();
-  if (depth === 0 && !plan && cfg.mcp !== false) {
+  if (depth === 0 && !plan && !chitChat && cfg.mcp !== false) {
     try {
       const { McpManager, mcpConfigured } = await import('./mcp.js');
       if (mcpConfigured()) {

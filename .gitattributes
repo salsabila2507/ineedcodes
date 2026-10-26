@@ -1,0 +1,7 @@
+# keep LF in the repo and in checkouts on every OS, so Windows does not
+# produce CRLF noise ("LF will be replaced by CRLF") or whole-file diffs
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
