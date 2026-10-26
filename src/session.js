@@ -18,7 +18,7 @@ import { saveSession, listSessions, loadSession } from './sessions.js';
 import * as boost from './boost.js';
 import { spawnSync } from 'node:child_process';
 import { mcpConfigured } from './mcp.js';
-import { listSkills, findSkill, devKeyword, DEFAULT_KEYWORD } from './skills.js';
+import { listSkills, findSkill, devKeyword } from './skills.js';
 import { runInit } from './init.js';
 
 function currentBranch(cwd) {
@@ -1284,7 +1284,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     if (input === '/skills' || input.startsWith('/skills ')) {
       const kw = devKeyword();
       const arg = input.slice(7).trim();
-      // the keyword may ride along ("/skills take me to jungle", "/skills sqli take me to jungle"):
+      // the keyword may ride along ("/skills my-secret-kw", "/skills sqli my-secret-kw"):
       // strip it so the remainder is the actual skill name to look up
       const argClean = kw ? arg.split(kw).join('').trim() : arg;
       if (argClean) {
@@ -1301,20 +1301,20 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         else say(red(`No skill named ${argClean}.`));
         return;
       }
-      // listing unlocks the same way a task does: the objective must contain the
-      // keyword (custom or the built-in jungle phrase). A custom unlock shows
-      // them even when the input carries nothing special
-      const objective = (input.includes(kw) || input.includes(DEFAULT_KEYWORD))
-        ? input
-        : (kw !== DEFAULT_KEYWORD ? kw : input);
+      // listing: once a keyword is configured (ineed unlock / INEED_DEV_KEYWORD),
+      // /skills reveals gated skills. With no keyword, they stay hidden.
+      const objective = kw ? (input.includes(kw) ? input : kw) : input;
       const all = listSkills(process.cwd(), objective);
       const gated = all.filter(x => x.gated).length;
-      say(all.length ? all.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
+      const open = all.filter(x => !x.gated);
+      say(open.length ? open.map(s => `  ${cyan(s.name)} ${dim('(' + s.scope + ')')} ${s.description}`).join('\n') : yellow('No skills installed.'));
       if (gated > 0) {
-        say(dim(`  (+${gated} gated security skills aktif)`));
+        say(dim(`  (+${gated} gated security skills visible with your unlock keyword)`));
         say(T.warning('  ⚠ use responsibly: only on systems you are authorized to test.'));
+      } else if (!kw) {
+        say(dim(`  Optional security pack is opt-in. Run ${bold('ineed skills-sync')} to download it, then ${bold('ineed unlock')} to set a keyword that reveals it.`));
       } else {
-        say(dim(`  security skills are missing or locked. Run ${bold('ineed skills-sync')} to download them from the repo, then activate them in a task with ${bold('"take me to jungle"')}`));
+        say(dim(`  Security pack not installed (or still locked). Run ${bold('ineed skills-sync')}, then mention your unlock keyword in a task.`));
       }
       return;
     }

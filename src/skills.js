@@ -3,10 +3,10 @@
 // Frontmatter: name, description, tools (optional restriction), instructions body below.
 //
 // GATED SKILLS: SKILL.md files whose frontmatter carries "gated: true" stay invisible
-// unless the objective text contains the developer keyword. The keyword resolves to
-// the built-in jungle phrase by default ("take me to jungle"), and can be overridden
-// with a private one via the INEED_DEV_KEYWORD environment variable or via
-// `ineed unlock` (stores it in ~/.ineedcodes/keyword, chmod 600).
+// by default. They only become visible when the task text contains a developer keyword
+// that the user has deliberately configured, via the INEED_DEV_KEYWORD environment
+// variable or `ineed unlock` (stored in ~/.ineedcodes/keyword, chmod 600). There is no
+// hardcoded default phrase: with nothing configured, gated skills never appear.
 // Activating them shows a responsible-use warning: authorized targets only.
 
 import * as fs from 'node:fs';
@@ -14,18 +14,18 @@ import * as path from 'node:path';
 import { CONFIG_DIR } from './config.js';
 import { fileURLToPath } from 'node:url';
 import * as url from 'node:url';
-const PKG_SKILLS = path.join(path.dirname(url.fileURLToPath(import.meta.url)), '..', 'skills');
+// The optional security pack lives outside the shipped tree and is never bundled in
+// the npm package. It is downloaded on request with `ineed skills-sync`.
+const PKG_SKILLS = path.join(path.dirname(url.fileURLToPath(import.meta.url)), '..', 'optional', 'skills-security');
 
 const KEYWORD_FILE = path.join(CONFIG_DIR, 'keyword');
 
-// the built-in phrase that activates developer skills: say it inside a task,
-// e.g. "take me to jungle, run the sqli skill against the lab target"
-export const DEFAULT_KEYWORD = 'take me to jungle';
-
+// The developer keyword that reveals gated skills. Empty unless the user configures
+// one (env var or `ineed unlock`); there is no built-in default phrase.
 export function devKeyword() {
   if (process.env.INEED_DEV_KEYWORD) return String(process.env.INEED_DEV_KEYWORD).trim();
   try { const f = fs.readFileSync(KEYWORD_FILE, 'utf8').trim(); if (f) return f; } catch {}
-  return DEFAULT_KEYWORD;
+  return '';
 }
 
 const BUILTIN = [
@@ -84,13 +84,10 @@ function loadDir(dir, scope, out, forceGated = false) {
 }
 
 function isUnlocked(objective) {
-  const o = String(objective ?? '');
-  if (!o) return false;
   const kw = devKeyword();
-  // the built-in jungle phrase always works; a custom keyword is an extra
-  // private path on top, it never disables the default phrase
-  if (kw && kw !== DEFAULT_KEYWORD && o.includes(kw)) return true;
-  return o.includes(DEFAULT_KEYWORD);
+  // no keyword configured means gated skills stay hidden, always
+  if (!kw) return false;
+  return String(objective ?? '').includes(kw);
 }
 
 export function listSkills(cwd, objective = '') {

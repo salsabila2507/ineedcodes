@@ -45,7 +45,7 @@ if (!(MAJOR >= 20)) {
   process.exit(1);
 }
 
-// unlock: store the developer keyword locally so gated security skills activate here
+// unlock: store a developer keyword locally so gated security skills can be revealed
 if (args[0] === 'unlock') {
   const readline = await import('node:readline');
   const { makeInput, dim, gray } = await import('./ui.js');
@@ -75,15 +75,15 @@ if (args[0] === 'unlock') {
   fs.mkdirSync(keywordDir, { recursive: true });
   fs.writeFileSync(keywordFile, keyword, { mode: 0o600 });
   try { fs.chmodSync(keywordFile, 0o600); } catch {}
-  console.log(green('Gated skills unlocked on this machine.'));
-  console.log(dim('Saved to ' + keywordFile + ' (0600). Use them by mentioning the keyword in a task, e.g. /skills or "use the sqli skill".'));
-  console.log(dim('(No unlock needed by default: saying "take me to jungle" in a task activates them. A custom keyword overrides the phrase.)'));
+  console.log(green('Developer keyword saved on this machine.'));
+  console.log(dim('Saved to ' + keywordFile + ' (0600). Mention this keyword in a task (or /skills) to reveal gated security skills.'));
+  console.log(dim('Without a keyword, gated skills stay hidden. Download them first with ') + bold('ineed skills-sync') + dim('.'));
   console.log(yellow('Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
 }
 
-// skills-sync: opt-in download of the gated security skills from the source
-// repository. The npm package ships a clean core, so skills live outside it.
+// skills-sync: opt-in download of the optional security skills from the source
+// repository. The npm package ships a clean core; the security pack is never auto-installed.
 if (args[0] === 'skills-sync') {
   const { skillsSync } = await import('./skillssync.js');
   console.log(dim('Downloading skills from the source repository...'));
@@ -96,8 +96,8 @@ if (args[0] === 'skills-sync') {
   console.log(dim('  from ' + r.repo + (r.commit ? ' @ ' + r.commit : '')));
   if (r.added?.length) console.log(dim('  added: ' + r.added.join(', ')));
   if (r.replaced?.length) console.log(yellow('  replaced existing: ' + r.replaced.join(', ')));
-  console.log(dim('Activate them in a task by saying "take me to jungle", or set a custom keyword with ineed unlock.'));
-  console.log(yellow('Use responsibly: only on systems you are authorized to test.'));
+  console.log(dim('These skills stay hidden until you set a keyword with ') + bold('ineed unlock') + dim(' and mention it in a task.'));
+  console.log(yellow('Optional and opt-in. Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
 }
 

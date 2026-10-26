@@ -225,8 +225,8 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
     : skillsFull.length > 8_000
       ? `\nInstalled skills (${skills.length} available; mention one by name and its full instructions load):\n${skills.map(s => `- ${s.name} (${s.scope})`).join('\n')}`
       : `\nInstalled skills (follow a skill's instructions when the user invokes it by name or clearly asks for what it does):\n${skillsFull}`;
-  // developer mode (jungle keyword present) has no extra hoops: a named gated
-  // skill activates on mention alone; the builtin humanizer still wants an ask
+  // developer mode (configured unlock keyword present) has no extra hoops: a named
+  // gated skill activates on mention alone; the builtin humanizer still wants an ask
   if (skills.some(s => s.gated)) hooks.onNote?.('developer mode on - use responsibly, only on targets you are authorized to test');
   const invokedSkill = !extra.worker
     ? skills.find(s => s.name

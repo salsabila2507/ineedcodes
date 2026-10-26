@@ -1,7 +1,7 @@
-// skillssync.js: download the gated security skills from the source repository
-// into ~/.ineedcodes/skills. The npm package ships a clean core (registry policy
-// blocks the bundled content), so skills are an explicit opt-in download.
-// Override the source with INEED_SKILLS_REPO (used by tests and forks).
+// skillssync.js: download the optional security skills from the source repository
+// into ~/.ineedcodes/skills. The npm package ships a clean core (the security pack
+// is not bundled), so these skills are an explicit, opt-in download that never
+// happens automatically. Override the source with INEED_SKILLS_REPO (tests, forks).
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -10,6 +10,8 @@ import * as path from 'node:path';
 import { CONFIG_DIR } from './config.js';
 
 const DEFAULT_REPO = 'https://github.com/salsabila2507/ineedcodes.git';
+// the optional security pack lives under optional/skills-security in the repo
+const SKILLS_SUBDIR = ['optional', 'skills-security'];
 
 export function skillsSync(opts = {}) {
   const repo = opts.repo || process.env.INEED_SKILLS_REPO || DEFAULT_REPO;
@@ -21,9 +23,9 @@ export function skillsSync(opts = {}) {
     // the user can see which commit landed on their machine
     const head = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: tmp, encoding: 'utf8' });
     const commit = (head.stdout ?? '').trim();
-    const src = path.join(tmp, 'skills');
+    const src = path.join(tmp, ...SKILLS_SUBDIR);
     let entries;
-    try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch { return { ok: false, error: 'the repository has no skills/ folder' }; }
+    try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch { return { ok: false, error: 'the repository has no ' + SKILLS_SUBDIR.join('/') + ' folder' }; }
     const dest = path.join(CONFIG_DIR, 'skills');
     fs.mkdirSync(dest, { recursive: true });
     let copied = 0;
