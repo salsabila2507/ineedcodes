@@ -1,7 +1,7 @@
 // wizard.js: first open. Bring-your-own-key: pick a normal provider (or paste any
 // OpenAI-compatible base URL), enter your key, then choose a real model. Saved once.
 
-import { fetchModels, chat } from './provider.js';
+import { fetchModels, chat, normalizeContent } from './provider.js';
 import { saveConfig } from './config.js';
 import { aliasFor } from './builtin.js';
 import { bold, dim, red, yellow, green, trunc, logo, BANNER, startSpinner } from './ui.js';
@@ -21,7 +21,7 @@ export async function testConnection(cfg, signal) {
   // a few reply tokens, no streaming, no backoff retries, so a slow or dead
   // provider fails fast instead of hanging the setup
   const m = await chat({ ...cfg, stream: false, reasoning: 'low' }, [{ role: 'user', content: 'Reply with exactly: OK' }], undefined, signal, undefined, undefined, { maxTokens: 16, attempts: 1 });
-  return String(m.content ?? '').trim();
+  return normalizeContent(m.content).trim();
 }
 
 // the setup test gets a hard deadline; INEED_TEST_TIMEOUT_MS overrides it (tests)

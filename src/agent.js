@@ -1,6 +1,6 @@
 // agent.js: the loop. objective -> reason -> tool call -> observe real result -> repeat -> verify -> report.
 
-import { chat } from './provider.js';
+import { chat, normalizeContent } from './provider.js';
 import { TOOLS, runTool, shellRun, isDestructive, isReadOnlyTool, GIT_TOOL_DEFS, runGitTool } from './tools.js';
 import { fetchUrl, webSearch } from './web.js';
 import { PROC_TOOL_DEFS, runProcTool } from './processes.js';
@@ -314,8 +314,9 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         if (ctrl.signal.aborted) break;
         throw err;
       }
-      messages.push(msg);
       if (msg._usage) { usage.input += msg._usage.input; usage.output += msg._usage.output; hooks.onUsage?.({ ...usage }); }
+      const { _usage, ...cleanMsg } = msg;
+      messages.push(cleanMsg);
       if (budget) {
         const spentTokens = usage.input + usage.output;
         const fmtBudget = n => n >= 1000 ? Math.round(n / 1000) + 'k' : String(n);
@@ -332,10 +333,11 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
           };
         }
       }
-      if (msg.content && msg.content !== lastShown) {
-        hooks.onText?.(msg.content);
-        lastShown = msg.content;
-        answer = msg.content;
+      const text = normalizeContent(msg.content);
+      if (text && text !== lastShown) {
+        hooks.onText?.(text);
+        lastShown = text;
+        answer = text;
       }
       const calls = msg.tool_calls ?? [];
       if (calls.length === 0) {

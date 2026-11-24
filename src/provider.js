@@ -176,12 +176,22 @@ function modelHint(status, text) {
   return '';
 }
 
+export function sanitizeMessages(messages) {
+  return messages.map(m => {
+    const clean = { role: m.role, content: normalizeContent(m.content) };
+    if (m.tool_calls) clean.tool_calls = m.tool_calls;
+    if (m.tool_call_id) clean.tool_call_id = m.tool_call_id;
+    if (m.name) clean.name = m.name;
+    return clean;
+  });
+}
+
 // opts.maxTokens caps the reply (the setup test only needs a word or two);
 // opts.attempts lowers the transient-retry count (the setup test fails fast
 // instead of backing off for ~20s on a dead address)
 export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts = {}) {
   await warmAlias(cfg, signal);
-  const body = { model: realModelId(cfg), messages, temperature: 0.2 };
+  const body = { model: realModelId(cfg), messages: sanitizeMessages(messages), temperature: 0.2 };
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   if (cfg.reasoning === 'high') body.reasoning_effort = 'high';
   if (cfg.stream === true) body.stream = true;
@@ -302,8 +312,11 @@ async function readStream(res, onDelta) {
         if (!d) continue;
         if (d.role) role = d.role;
         if (d.content) {
-          content += d.content;
-          onDelta?.(d.content);
+          const chunkText = normalizeContent(d.content);
+          if (chunkText) {
+            content += chunkText;
+            onDelta?.(chunkText);
+          }
         }
         for (const tc of d.tool_calls ?? []) {
           const i = tc.index ?? 0;
@@ -400,23 +413,72 @@ async function readCompletion(res, signal) {
     if (j.usage) usage = j.usage;
     const d = j.choices?.[0]?.delta ?? {};
     if (d.role) role = d.role;
-    if (d.content) content += d.content;
+    if (d.content) {
+      const chunkText = normalizeContent(d.content);
+      if (chunkText) content += chunkText;
+    }
     for (const tc of d.tool_calls ?? []) toolCalls.set(tc.index ?? toolCalls.size, { ...(toolCalls.get(tc.index) ?? {}), ...tc });
   }
-  const message = { role, content };
+  const message = { role, content: normalizeContent(content) };
   if (toolCalls.size) message.tool_calls = [...toolCalls.values()];
   return { choices: [{ message }], usage };
 }
 
+export function normalizeContent(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const textParts = [];
+    for (const part of content) {
+      if (typeof part === 'string') {
+        textParts.push(part);
+      } else if (part && typeof part === 'object') {
+        if (part.type === 'thinking' || part.type === 'reasoning') continue;
+        if (typeof part.text === 'string') textParts.push(part.text);
+        else if (typeof part.content === 'string') textParts.push(part.content);
+        else if (typeof part.value === 'string') textParts.push(part.value);
+        else if (typeof part.output === 'string') textParts.push(part.output);
+      }
+    }
+    if (textParts.length > 0) return textParts.join('');
+    // fallback if array only had thinking blocks
+    for (const part of content) {
+      if (part && typeof part === 'object') {
+        if (Array.isArray(part.thinking)) {
+          const t = part.thinking.map(x => x?.text || x?.content || (typeof x === 'string' ? x : '')).join('');
+          if (t) return t;
+        }
+        if (typeof part.thinking === 'string') return part.thinking;
+        if (typeof part.reasoning === 'string') return part.reasoning;
+      }
+    }
+    return '';
+  }
+  if (typeof content === 'object') {
+    if (typeof content.text === 'string') return content.text;
+    if (typeof content.content === 'string') return content.content;
+    if (typeof content.value === 'string') return content.value;
+    if (Array.isArray(content.thinking)) {
+      return content.thinking.map(x => x?.text || (typeof x === 'string' ? x : '')).join('');
+    }
+    if (typeof content.thinking === 'string') return content.thinking;
+    return '';
+  }
+  return String(content);
+}
+
 function parseMessage(json) {
   const choice = json?.choices?.[0];
+  const toolCalls = choice?.message?.tool_calls ?? [];
+  const content = normalizeContent(choice?.message?.content);
   // a 200 with no usable choice used to look like a finished task with no
   // output; say what actually came back instead
-  if (!choice || !choice.message || (!choice.message.content && !(choice.message.tool_calls ?? []).length)) {
+  if (!choice || !choice.message || (!content && !toolCalls.length)) {
     const hint = Array.isArray(json?.choices) ? 'the server returned no message' : 'the response was not in the OpenAI format';
     throw new Error(`Provider sent an unusable reply (${hint}). Try /model, or check the provider with: ineed provider use <name>`);
   }
-  const msg = choice.message;
+  const msg = { ...choice.message, content };
+  if (toolCalls.length) msg.tool_calls = toolCalls;
   // surface token usage when the provider returns it (OpenAI-style usage block)
   if (json.usage) msg._usage = {
     input: json.usage.prompt_tokens ?? 0,
