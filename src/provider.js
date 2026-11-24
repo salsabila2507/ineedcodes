@@ -137,9 +137,14 @@ export async function fetchModels(cfg, signal) {
 }
 
 // human guidance for the status codes a hosted gateway actually returns
-function httpHint(status) {
-  if (status === 401 || status === 403) return ' - API key rejected or not allowed here. Run: ineed provider (or /provider in-session), or check your key.';
-  if (status === 402) return ' - this key is out of credit. Top up in the provider dashboard, or switch: ineed provider (or /provider in-session)';
+function httpHint(status, text = '') {
+  const s = String(text).toLowerCase();
+  if (status === 401 || status === 403 || s.includes('plan_expired') || s.includes('invalid_api_key')) {
+    return ' - API key rejected or not allowed here. Run: ineed provider (or /provider in-session), or check your key.';
+  }
+  if (status === 402 || s.includes('insufficient') || s.includes('quota') || s.includes('balance') || s.includes('out of credit')) {
+    return ' - this key is out of credit. Top up in the provider dashboard, or switch: ineed provider (or /provider in-session)';
+  }
   if (status === 404) return ' - API address not found. Check the base URL, it usually ends with /v1. See: ineed provider (or /config in-session)';
   if (status === 429) return ' - too many requests. Wait a moment and try again.';
   if (status >= 500) return ' - the provider is having trouble. Try again in a little while.';
@@ -223,7 +228,7 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts =
       const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!retry.ok) {
         const t = (await readBody(retry, signal)).slice(0, 200);
-        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status)}${modelHint(retry.status, t)}`);
+        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status, t)}${modelHint(retry.status, t)}`);
       }
       return parseMessage(await readCompletion(retry, signal));
     }
@@ -234,7 +239,7 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts =
       const retry = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!retry.ok) {
         const t = (await readBody(retry, signal)).slice(0, 200);
-        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status)}${modelHint(retry.status, t)}`);
+        throw new Error(`HTTP ${retry.status}: ${t}${httpHint(retry.status, t)}${modelHint(retry.status, t)}`);
       }
       return parseMessage(await readCompletion(retry, signal));
     }
@@ -244,11 +249,11 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts =
       res = await request(`${cfg.baseUrl}/chat/completions`, { method: 'POST', headers, body: JSON.stringify(body) }, signal);
       if (!res.ok) {
         const t = (await readBody(res, signal)).slice(0, 200);
-        throw new Error(`HTTP ${res.status}: ${t}${httpHint(res.status)}${modelHint(res.status, t)}`);
+        throw new Error(`HTTP ${res.status}: ${t}${httpHint(res.status, t)}${modelHint(res.status, t)}`);
       }
       return parseMessage(await readCompletion(res, signal));
     }
-    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status)}${modelHint(res.status, text)}`);
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status, text)}${modelHint(res.status, text)}`);
   }
   if (body.stream) return readStream(res, onDelta);
   return parseMessage(await readCompletion(res, signal));
