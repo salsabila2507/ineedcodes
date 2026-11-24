@@ -67,7 +67,21 @@ export const GIT_TOOL_DEFS = [
   { name: 'git_restore', description: 'Discard unstaged changes of one path. Destructive: asks like other edits.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }, git: true, mutating: true }
 ];
 
-const underRoot = (p, root) => p === root || p.startsWith(root + path.sep);
+// Reject linked components, including dangling links before a create. Resolve
+// existing components as well: on Windows a junction can look like a folder.
+export function safeProjectPath(p, root) {
+  const rel = path.relative(root, p);
+  if (path.isAbsolute(rel) || rel === '..' || rel.startsWith('..' + path.sep)) return false;
+  let current = fs.realpathSync.native(root);
+  for (const part of rel.split(path.sep).filter(Boolean)) {
+    if (process.platform === 'win32' && /:|[. ]$/.test(part)) return false;
+    current = path.join(current, part);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink() || path.relative(current, fs.realpathSync.native(current)) !== '') return false;
+    } catch (err) { if (err.code !== 'ENOENT') return false; }
+  }
+  return true;
+}
 
 // Anything that habitually holds a credential stays out of the model context.
 // Being wrong in the safe direction is the point: a refused read is a retry,
@@ -94,7 +108,7 @@ const SECRET_PATTERNS = [
 const fwdSlashes = p => String(p).replace(/\\/g, '/');
 
 function isSecret(abs) {
-  const p = fwdSlashes(abs);
+  const p = fwdSlashes(abs).toLowerCase();
   return SECRET_PATTERNS.some(re => re.test(p));
 }
 
@@ -103,7 +117,7 @@ function isSecret(abs) {
 // execution. Everything the agent legitimately needs is covered by the
 // first-class git_* tools.
 function isGitInternal(abs) {
-  return /(^|\/)\.git(\/|$)/.test(fwdSlashes(abs));
+  return /(^|\/)\.git(\/|$)/i.test(fwdSlashes(abs));
 }
 
 export const TOOLS = [
@@ -205,7 +219,7 @@ export const TOOLS = [
 export function runTool(name, input, cwd) {
   try {
     const abs = path.resolve(cwd, String(input.path ?? ''));
-    if (!underRoot(abs, cwd)) return { output: 'Refused: path is outside the working directory.' };
+    if (!safeProjectPath(abs, cwd)) return { output: 'Refused: path is linked or outside the working directory.' };
     if (isGitInternal(abs)) return { output: 'Refused: .git/ internals stay off limits (config can hold credentials, hooks are executable). Use the git_status/git_diff/git_log tools instead.' };
     if (name === 'list_files') {
       const out = [];
@@ -215,7 +229,7 @@ export function runTool(name, input, cwd) {
         let entries;
         try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
         for (const e of entries) {
-          if (skip.has(e.name)) continue;
+          if (skip.has(e.name) || e.isSymbolicLink()) continue;
           out.push(e.isDirectory() ? e.name + '/' : e.name);
           if (e.isDirectory()) walk(path.join(d, e.name), depth + 1);
         }
@@ -251,8 +265,9 @@ export function runTool(name, input, cwd) {
           if (out.length >= 100) return;
           if (skip.has(e.name)) continue;
           const p = path.join(d, e.name);
+          if (isSecret(p) || isGitInternal(p) || !safeProjectPath(p, cwd)) continue;
           if (e.isDirectory()) { walk(p, depth + 1); continue; }
-          if (e.name.startsWith('.env') || e.name.endsWith('.pem')) continue;
+          if (!e.isFile()) continue;
           let lines;
           try { lines = fs.readFileSync(p, 'utf8').split('\n'); } catch { continue; }
           for (let i = 0; i < lines.length && out.length < 100; i++) {
@@ -299,7 +314,7 @@ export function runTool(name, input, cwd) {
     }
     if (name === 'copy_file') {
       const dest = path.resolve(cwd, String(input.to ?? ''));
-      if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      if (!safeProjectPath(dest, cwd)) return { output: 'Refused: destination is linked or outside the working directory.' };
       // both ends checked: a copy is just a read+write, and would bypass the
       // secret-file block (copy .env to notes.txt, then read notes.txt)
       if (isSecret(abs) || isSecret(dest)) return { output: 'Refused: secret files stay where they are, so keys never end up in readable files.' };
@@ -311,7 +326,7 @@ export function runTool(name, input, cwd) {
     }
     if (name === 'move_file') {
       const dest = path.resolve(cwd, String(input.to ?? ''));
-      if (!underRoot(dest, cwd)) return { output: 'Refused: destination is outside the working directory.' };
+      if (!safeProjectPath(dest, cwd)) return { output: 'Refused: destination is linked or outside the working directory.' };
       if (isSecret(abs) || isSecret(dest)) return { output: 'Refused: secret files stay where they are, so keys never end up in readable files.' };
       if (isGitInternal(dest)) return { output: 'Refused: writing into .git/ is blocked (hooks are executable).' };
       fs.renameSync(abs, dest);

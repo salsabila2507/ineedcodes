@@ -2,12 +2,23 @@
 // The agent never depends on icm internals; if icm is missing or slow, memory is silently empty.
 
 import { spawn } from 'node:child_process';
+import * as path from 'node:path';
+import { existsSync } from 'node:fs';
 
 function icm(args, timeoutMs = 10_000) {
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn('icm', args, { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+      let bin = process.env.INEED_ICM_PATH;
+      if (bin && !path.isAbsolute(bin)) return resolve(null);
+      if (!bin && process.platform === 'win32') {
+        bin = (process.env.PATH || '').split(path.delimiter).filter(p => path.isAbsolute(p))
+          .map(p => path.join(p, 'icm.exe')).find(p => existsSync(p));
+        if (!bin) return resolve(null);
+      }
+      if (bin && /\.(?:cmd|bat)$/i.test(bin)) return resolve(null);
+      const js = bin && /\.[cm]?js$/i.test(bin);
+      child = spawn(js ? process.execPath : bin || 'icm', js ? [bin, ...args] : args, { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
     } catch {
       resolve(null);
       return;

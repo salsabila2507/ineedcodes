@@ -230,13 +230,14 @@ if (args[0] === '--child') {
     }
     const { makeInput } = await import('./ui.js');
     let rl = null;
+    let readAnswer;
     const ask = async q => {
-      if (!canAsk) return '';
       if (!rl) {
         const readlineMod = await import('node:readline');
         rl = readlineMod.createInterface({ input: process.stdin, output: process.stdout });
+        readAnswer = makeInput(rl);
       }
-      return makeInput(rl)(q);
+      return readAnswer(q, { onEof: 'n' });
     };
     let interrupted = null;
     let lastProgressAt = 0;

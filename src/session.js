@@ -746,7 +746,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         const overwrites = (name === 'write_file' || name === 'copy_file' || name === 'move_file') && input2?.path
           && fs.existsSync(path.resolve(process.cwd(), String(input2.path))) ? T.warning('  (overwrites an existing file)') : '';
         say(T.warning('  ⚠ approval needed') + ' ' + T.command(name) + T.muted(' ' + detail) + overwrites);
-        const a = await ask('     [y] once (Enter) · [a] this session · [s] always (save) · [n] no: ');
+        const a = await ask('     [y] once (Enter) · [a] this session · [s] always (save) · [n] no: ', { onEof: 'n' });
         const c = a.trim().toLowerCase();
         if (c === 's' || c === 'save' || c === 'simpan') {
           approved.add(cat);
@@ -1056,13 +1056,14 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     '/clear': async () => {
       history = [];
       if (sessionId) {
+        const savedId = sessionId;
+        sessionId = null;
         const { deleteSession } = await import('./sessions.js');
         const answer = (await ask('  Also delete the saved copy on disk? [y/N] ')).trim().toLowerCase();
         if (answer === 'y' || answer === 'yes') {
-          deleteSession(sessionId);
-          say(dim('Conversation and its saved copy are gone.'));
+          say(dim(deleteSession(savedId) ? 'Conversation and its saved copy are gone.' : 'Chat cleared here. Could not delete the saved copy.'));
         } else {
-          say(dim('Chat cleared here. The saved copy still exists (/resume ' + sessionId + ').'));
+          say(dim('Chat cleared here. The saved copy still exists (/resume ' + savedId + ').'));
         }
       } else {
         say(dim('Conversation forgotten.'));

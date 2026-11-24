@@ -264,7 +264,6 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
   ];
   const changed = new Set();
   const ran = [];
-  const humanizeWork = [];   // background copy passes, awaited before the final report
   const budget = Math.max(0, Number(cfg.tokenBudget) || 0);
   let budgetWarned = false;
   const todos = [];
@@ -341,8 +340,6 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       }
       const calls = msg.tool_calls ?? [];
       if (calls.length === 0) {
-        // last chance to let a background copy pass land before we call it done
-        if (humanizeWork.length) await Promise.allSettled(humanizeWork.splice(0));
         // task finished: store durable knowledge only when something actually
         // changed. Fire-and-forget: awaiting it adds the full icm round-trip
         // (seconds) after the answer, before the user sees "Done"
@@ -455,7 +452,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
               if (verdict === 'always') hooks.approved?.add('shell');
               allowedNow = Boolean(verdict);
             }
-            result = allowedNow ? runProcTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
+            result = allowedNow ? await runProcTool(call.function?.name, input, cwd) : { output: `Denied: the user did not approve ${call.function?.name}.` };
             }
           }
         } else if (call.function?.name === 'shell') {
@@ -500,18 +497,14 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
               && !/^(Refused|Error|Denied)/.test(String(result.output))) {
               changed.add(String(input.path ?? ''));
               // humanizer pass: prose files only (html/md/txt), code never touched
-              // (rule 21). It is a second model call, so it runs in the
-              // background instead of delaying every write; the result is
-              // awaited once, just before the task reports back.
+              // Finish before any following edit to the same document.
               if (name === 'write_file' && cfg.humanize !== false) {
                 const abs = path.resolve(cwd, String(input.path ?? ''));
-                humanizeWork.push((async () => {
-                  try {
-                    const { humanizeFile } = await import('./humanize.js');
-                    const hr = await humanizeFile(cfg, abs, ctrl.signal, { skipModel: false });
-                    if (hr.changed) hooks.onNote?.(`humanized copy in ${String(input.path)}`);
-                  } catch {}
-                })());
+                try {
+                  const { humanizeFile } = await import('./humanize.js');
+                  const hr = await humanizeFile(cfg, abs, ctrl.signal, { root: cwd, expected: String(input.content ?? '') });
+                  if (hr.changed) hooks.onNote?.(`humanized copy in ${String(input.path)}`);
+                } catch {}
               }
             }
           }
@@ -520,8 +513,8 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       };
 
       const PARALLEL_READS = Math.min(8, Math.max(2, Number(cfg.parallelReads) || 6));
-      const readCache = new Map();
       const runReadGroup = async group => {
+        const readCache = new Map(); // a write between groups invalidates every read
         const out = new Array(group.length);
         let next = 0;
         const take = async () => {
@@ -529,14 +522,9 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
             const i = next++;
             if (ctrl.signal.aborted) { out[i] = { output: 'Stopped by the user.' }; continue; }
             const call = group[i];
-            let input = {};
-            try { input = JSON.parse(call.function?.arguments || '{}'); } catch {}
-            // the same read twice in one step is one read
-            const key = call.function?.name + ':' + (input.path ?? '') + ':' + (input.pattern ?? '');
-            if (readCache.has(key)) { out[i] = readCache.get(key); continue; }
-            const r = await runOneCall(call);
-            readCache.set(key, r);
-            out[i] = r;
+            const key = JSON.stringify([call.function?.name, call.function?.arguments]);
+            if (!readCache.has(key)) readCache.set(key, runOneCall(call));
+            out[i] = await readCache.get(key);
           }
         };
         await Promise.all(Array.from({ length: Math.min(PARALLEL_READS, group.length) }, take));

@@ -5,7 +5,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
@@ -53,10 +53,14 @@ const h = spawnSync(bin, ['--help'], { encoding: 'utf8', timeout: 30_000, shell:
 check('installed bin --help works', h.status === 0 && h.stdout.includes('--reset') && h.stdout.includes('ineed "'), h.stdout + h.stderr);
 
 // 5. no ERR_MODULE_NOT_FOUND on any import path (the v0.2.0 killer)
-const probe = spawnSync(process.execPath, ['-e', `
-  import(${JSON.stringify(path.join(prefix, 'node_modules', 'ineedcodes', 'src', 'cli.js'))}).catch(e => { console.error(e.code || e.message); process.exit(1); });
-`], { encoding: 'utf8', timeout: 30_000, input: '' });
-check('cli.js imports cleanly from installed package', !String(probe.stderr).includes('ERR_MODULE_NOT_FOUND'), probe.stderr);
+const installedSrc = path.join(prefix, 'node_modules', 'ineedcodes', 'src');
+const modules = fs.readdirSync(installedSrc).filter(f => f.endsWith('.js') && f !== 'cli.js').concat('cli.js');
+const urls = modules.map(f => pathToFileURL(path.join(installedSrc, f)).href);
+const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
+  process.argv[2] = '--version';
+  for (const url of ${JSON.stringify(urls)}) await import(url);
+`], { cwd: TMP, encoding: 'utf8', timeout: 30_000, input: '' });
+check('installed runtime modules import cleanly', probe.status === 0 && probe.stdout?.includes('ineed ' + VERSION), probe.error || probe.stderr);
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);

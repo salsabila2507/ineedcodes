@@ -21,26 +21,28 @@ function sleep(ms, signal, onNote) {
 
 // read a body with a deadline: a connection that stops mid-body must not hang
 async function readBody(res, signal) {
-  if (!res.body) return await res.text();
-  const ctrl = new AbortController();
-  const relay = () => ctrl.abort();
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  let timedOut = false;
+  const relay = () => { reader.cancel().catch(() => {}); };
   signal?.addEventListener('abort', relay, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), BODY_TIMEOUT);
+  if (signal?.aborted) relay();
+  const timer = setTimeout(() => { timedOut = true; relay(); }, BODY_TIMEOUT);
   try {
-    const reader = res.body.getReader();
     const dec = new TextDecoder();
     let raw = '';
     for (;;) {
       const { done, value } = await reader.read();
+      if (signal?.aborted) throw Object.assign(new Error('stopped by user'), { stopped: true, reason: signal.reason });
+      if (timedOut) throw new Error('response body timed out after 120s');
       if (done) break;
       raw += dec.decode(value, { stream: true });
       if (raw.length > 8_000_000) { try { await reader.cancel(); } catch {} break; }
     }
     raw += dec.decode();
     return raw;
-  } catch (err) {
-    return '';
   } finally {
+    reader.releaseLock();
     clearTimeout(timer);
     signal?.removeEventListener('abort', relay);
   }
@@ -52,6 +54,7 @@ async function request(url, opts, signal) {
   const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, HTTP_TIMEOUT);
   const relay = () => ctrl.abort();
   signal?.addEventListener('abort', relay, { once: true });
+  if (signal?.aborted) relay();
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } catch (err) {
@@ -124,7 +127,7 @@ export async function fetchModels(cfg, signal) {
   if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
   const res = await request(`${cfg.baseUrl}/models`, { headers }, signal);
   if (!res.ok) throw new Error(`HTTP ${res.status} on GET /models${httpHint(res.status)}`);
-  const data = await res.json();
+  const data = JSON.parse(await readBody(res, signal));
   const ids = [...new Set((data.data ?? []).map(m => m.id).filter(Boolean))];
   const alias = String(cfg.modelAlias ?? '').trim();
   if (!alias) {
@@ -265,7 +268,7 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts =
     }
     throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}${httpHint(res.status, text)}${modelHint(res.status, text)}`);
   }
-  if (body.stream) return readStream(res, onDelta);
+  if (body.stream) return readStream(res, onDelta, signal);
   return parseMessage(await readCompletion(res, signal));
 }
 
@@ -274,12 +277,29 @@ export async function chat(cfg, messages, tools, signal, onDelta, onNote, opts =
 // would otherwise wait forever, so a stall deadline cancels the reader instead.
 const STREAM_STALL_MS = 90_000;
 
-async function readStream(res, onDelta) {
+function mergeToolDeltas(calls, deltas = []) {
+  for (const [pos, delta] of (deltas ?? []).entries()) {
+    const index = delta.index ?? pos;
+    if (!Number.isSafeInteger(index) || index < 0) throw new Error('Invalid tool call index');
+    const call = calls.get(index) ?? { id: 'call_' + index, type: 'function', function: { name: '', arguments: '' } };
+    if (delta.id) call.id = delta.id;
+    call.function.name += delta.function?.name ?? '';
+    call.function.arguments += delta.function?.arguments ?? '';
+    calls.set(index, call);
+  }
+}
+
+const orderedCalls = calls => [...calls].sort(([a], [b]) => a - b).map(([, call]) => call);
+
+async function readStream(res, onDelta, signal) {
   const reader = res.body.getReader();
+  const cancel = () => { reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '';
-  const toolCalls = [];
+  const toolCalls = new Map();
   let usage = null;
   let role = 'assistant';
   let stalled = false;
@@ -288,7 +308,7 @@ async function readStream(res, onDelta) {
     clearTimeout(stall);
     stall = setTimeout(() => {
       stalled = true;
-      try { reader.cancel(); } catch {}   // pending read() resolves done
+      cancel();   // pending read() resolves done
     }, STREAM_STALL_MS);
   };
   armStall();
@@ -318,18 +338,15 @@ async function readStream(res, onDelta) {
             onDelta?.(chunkText);
           }
         }
-        for (const tc of d.tool_calls ?? []) {
-          const i = tc.index ?? 0;
-          toolCalls[i] ??= { id: tc.id ?? ('call_' + i), type: 'function', function: { name: '', arguments: '' } };
-          if (tc.id) toolCalls[i].id = tc.id;
-          if (tc.function?.name) toolCalls[i].function.name += tc.function.name;
-          if (tc.function?.arguments) toolCalls[i].function.arguments += tc.function.arguments;
-        }
+        mergeToolDeltas(toolCalls, d.tool_calls);
       }
     }
   } finally {
     clearTimeout(stall);
+    signal?.removeEventListener('abort', cancel);
+    reader.releaseLock();
   }
+  if (signal?.aborted) throw Object.assign(new Error('stopped by user'), { stopped: true, reason: signal.reason });
   // a stalled stream can end mid tool-call: the partial JSON must never be
   // returned as if it were a complete message. "(timed out)" puts it in the
   // retryable class the session's recovery prompt already understands
@@ -337,17 +354,17 @@ async function readStream(res, onDelta) {
   // Some providers ignore stream:true and answer with one plain JSON body. The
   // stream reader then sees no data: lines and would report an empty answer,
   // which used to look like a finished task with no output. Parse it instead.
-  if (!content && !toolCalls.length && !usage && buffer.trim().startsWith('{')) {
+  if (!content && !toolCalls.size && !usage && buffer.trim().startsWith('{')) {
     try {
       return parseMessage(JSON.parse(buffer));
     } catch (err) {
       if (err && /unusable reply/.test(String(err.message))) throw err;
     }
   }
-  const msg = { role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
+  const msg = { role, content, ...(toolCalls.size ? { tool_calls: orderedCalls(toolCalls) } : {}) };
   if (usage) msg._usage = { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 };
   // a stream that produced neither text nor a tool call is not a usable answer
-  if (!content && !toolCalls.length) {
+  if (!content && !toolCalls.size) {
     throw new Error('Provider sent an unusable reply (the stream carried no message). Try /model, or turn streaming off with "stream": false in the config.');
   }
   return msg;
@@ -390,14 +407,14 @@ async function readCompletion(res, signal) {
   // a newline ("...}{\n\ndata: [DONE]" or "...}data: [DONE]"), and others stream
   // the whole reply even when stream was not requested. Take the first complete
   // JSON value; if there is none, assemble the answer from the SSE chunks.
-  const trailer = raw.search(/data:|event:/);
-  if (trailer > 0) {
-    const head = raw.slice(0, trailer).trim();
-    try { return JSON.parse(head); } catch {}
-    const obj = firstJsonObject(head);
-    if (obj) { try { return JSON.parse(obj); } catch {} }
+  try { return JSON.parse(raw); } catch (err) {
+    if (/^\s*[{\[]/.test(raw)) {
+      const obj = firstJsonObject(raw);
+      if (obj && /^\s*(?:data|event):/.test(raw.trimStart().slice(obj.length))) return JSON.parse(obj);
+      throw err;
+    }
+    if (!/^\s*(?:data|event):/m.test(raw)) throw err;
   }
-  if (trailer === -1) return JSON.parse(raw);
   let content = '';
   let role = 'assistant';
   const toolCalls = new Map();
@@ -417,10 +434,10 @@ async function readCompletion(res, signal) {
       const chunkText = normalizeContent(d.content);
       if (chunkText) content += chunkText;
     }
-    for (const tc of d.tool_calls ?? []) toolCalls.set(tc.index ?? toolCalls.size, { ...(toolCalls.get(tc.index) ?? {}), ...tc });
+    mergeToolDeltas(toolCalls, d.tool_calls);
   }
   const message = { role, content: normalizeContent(content) };
-  if (toolCalls.size) message.tool_calls = [...toolCalls.values()];
+  if (toolCalls.size) message.tool_calls = orderedCalls(toolCalls);
   return { choices: [{ message }], usage };
 }
 
@@ -440,28 +457,13 @@ export function normalizeContent(content) {
         else if (typeof part.output === 'string') textParts.push(part.output);
       }
     }
-    if (textParts.length > 0) return textParts.join('');
-    // fallback if array only had thinking blocks
-    for (const part of content) {
-      if (part && typeof part === 'object') {
-        if (Array.isArray(part.thinking)) {
-          const t = part.thinking.map(x => x?.text || x?.content || (typeof x === 'string' ? x : '')).join('');
-          if (t) return t;
-        }
-        if (typeof part.thinking === 'string') return part.thinking;
-        if (typeof part.reasoning === 'string') return part.reasoning;
-      }
-    }
-    return '';
+    return textParts.join('');
   }
   if (typeof content === 'object') {
+    if (content.type === 'thinking' || content.type === 'reasoning') return '';
     if (typeof content.text === 'string') return content.text;
     if (typeof content.content === 'string') return content.content;
     if (typeof content.value === 'string') return content.value;
-    if (Array.isArray(content.thinking)) {
-      return content.thinking.map(x => x?.text || (typeof x === 'string' ? x : '')).join('');
-    }
-    if (typeof content.thinking === 'string') return content.thinking;
     return '';
   }
   return String(content);

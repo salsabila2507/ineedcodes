@@ -5,6 +5,7 @@
 
 import * as fs from 'node:fs';
 import { chat } from './provider.js';
+import { safeProjectPath } from './tools.js';
 
 const PROSE_EXT = new Set(['.html', '.htm', '.md', '.markdown', '.txt']);
 const CODE_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml', '.css', '.scss', '.py', '.rb', '.go', '.rs', '.java', '.php', '.sh', '.sql', '.toml', '.xml', '.svg']);
@@ -49,23 +50,67 @@ function applyRules(text) {
   return out;
 }
 
-// Extract copy blocks from HTML: between > and < (text nodes). Tag names, attributes,
-// scripts, styles, and comments are left byte-identical.
-function humanizeHtmlTextNodes(html, fn) {
-  return html.replace(/(<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<!--[\s\S]*?-->)/gi, m => '\x00BLOCK' + Buffer.from(m).toString('base64') + '\x00')
-    .replace(/>([^<>]+)</g, (m, text) => {
-      if (!/[a-zA-Z]/.test(text)) return m;
-      const next = fn(text);
-      return next === text ? m : '>' + next + '<';
-    })
-    .replace(/\x00BLOCK([A-Za-z0-9+/=]+)\x00/g, (_, b64) => Buffer.from(b64, 'base64').toString());
+// Only rewrite unambiguous prose spans in well-nested, ordinary HTML. Keep
+// the source itself as the template; unsupported markup is left untouched.
+function copySpans(html) {
+  const spans = [], stack = [];
+  const prose = /^(?:p|h[1-6]|li|a|span|strong|em|b|i|button|label|figcaption|blockquote|div|body)$/;
+  const tag = /<(\/?)(([a-z][\w-]*))((?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/iy;
+  let pos = 0;
+  while (pos < html.length) {
+    if (html[pos] !== '<') {
+      const end = html.indexOf('<', pos);
+      const text = html.slice(pos, end < 0 ? html.length : end);
+      const trimmed = text.trim();
+      if (prose.test(stack.at(-1)?.name) && !stack.at(-1)?.skip && /\p{L}/u.test(trimmed) && !/[&\r\n]/.test(trimmed)) {
+        const start = pos + text.indexOf(trimmed);
+        spans.push({ start, end: start + trimmed.length, text: trimmed });
+      }
+      pos += text.length;
+      continue;
+    }
+    if (html.startsWith('<!--', pos)) {
+      const end = html.indexOf('-->', pos + 4);
+      if (end < 0 || html.slice(pos + 4, end).includes('--')) return [];
+      pos = end + 3; continue;
+    }
+    const decl = /^<!doctype\s+html\s*>/i.exec(html.slice(pos));
+    if (decl) { pos += decl[0].length; continue; }
+    tag.lastIndex = pos;
+    const m = tag.exec(html);
+    if (!m) return [];
+    const name = m[2].toLowerCase();
+    pos = tag.lastIndex;
+    if (m[1]) { if (stack.pop()?.name !== name) return []; continue; }
+    if (/^(?:svg|math|plaintext|noscript|xmp|noembed|noframes|iframe|template)$/.test(name)) return [];
+    if (/^(?:script|style|textarea|title)$/.test(name)) {
+      const close = new RegExp('</' + name + '\\s*>', 'ig'); close.lastIndex = pos;
+      if (!close.exec(html) || (name === 'script' && html.slice(pos, close.lastIndex).includes('<!--'))) return [];
+      pos = close.lastIndex; continue;
+    }
+    if (/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(name)) continue;
+    if (m[5]) return [];
+    stack.push({ name, skip: stack.at(-1)?.skip || /^(?:head|pre|code|kbd|samp)$/.test(name) || /\s(?:hidden|style|aria-hidden)\b/i.test(m[4]) });
+  }
+  return stack.length ? [] : spans;
+}
+
+function renderCopy(html, spans, lines) {
+  let out = html;
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const { start, end, text } = spans[i];
+    if (lines[i] === text) continue;
+    const safe = lines[i].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    out = out.slice(0, start) + safe + out.slice(end);
+  }
+  return out;
 }
 
 async function humanizeWithModel(cfg, text, kind, signal) {
   const prompt = (kind === 'html'
     ? `Below is the text content of an HTML page. Rewrite ONLY the marketing copy so it reads like a human wrote it: drop AI cliches ("game-changer", "cutting-edge", "unlock", "seamless"), filler openers, and excessive enthusiasm. Never use em dashes. Keep the message, facts, product names, numbers, and the original language exactly. Reply with ONLY the rewritten text, same line structure. If nothing needs changing, reply with the text unchanged.`
     : `Rewrite the text below so it reads like a human wrote it: drop AI cliches and filler, keep it natural and direct. Never use em dashes. Keep the message, facts, names, numbers, and language exactly. Keep the same line structure. Reply with ONLY the rewritten text. If nothing needs changing, reply with it unchanged.`)
-    + `\n---\n${text.slice(0, 8000)}`;
+    + `\n---\n${text}`;
   const msg = await chat({ ...cfg, reasoning: 'low' }, [{ role: 'user', content: prompt }], undefined, signal);
   const out = String(msg.content ?? '').trim();
   return out || text;
@@ -73,30 +118,32 @@ async function humanizeWithModel(cfg, text, kind, signal) {
 
 export async function humanizeFile(cfg, absPath, signal, hooks = {}) {
   if (!isHumanizableFile(absPath)) return { changed: false, reason: 'not a prose file' };
+  const safe = () => !signal?.aborted && (!hooks.root || safeProjectPath(absPath, hooks.root));
+  if (!safe()) return { changed: false, reason: 'path changed or task stopped' };
   let src;
   try { src = fs.readFileSync(absPath, 'utf8'); } catch (err) { return { changed: false, reason: err.message }; }
   if (src.length < 40) return { changed: false, reason: 'too short' };
+  if (hooks.expected !== undefined && src !== hooks.expected) return { changed: false, reason: 'file changed' };
+  if (src.length > 8000) return { changed: false, reason: 'document exceeds rewrite limit' };
 
   const ext = absPath.slice(absPath.lastIndexOf('.')).toLowerCase();
   const isHtml = ext === '.html' || ext === '.htm';
   const kind = isHtml ? 'html' : 'text';
 
   // step 1: deterministic rules
-  let next = isHtml
-    ? humanizeHtmlTextNodes(src, applyRules)
-    : applyRules(src);
+  const spans = isHtml ? copySpans(src) : [];
+  if (isHtml && !spans.length) return { changed: false, reason: 'no eligible HTML copy' };
+  const lines = spans.map(s => applyRules(s.text));
+  let next = isHtml ? renderCopy(src, spans, lines) : applyRules(src);
 
   // step 2: model pass (skipped in plan mode or when no hooks provide a provider)
   const before = next;
   if (cfg?.apiKey && !hooks.skipModel) {
     try {
       if (isHtml) {
-        next = humanizeHtmlTextNodes(next, t => t); // normalize markers once
-        const plain = next; // model sees text-node friendly form already
-        const rewritten = await humanizeWithModel(cfg, stripTagsForPrompt(plain), kind, signal);
-        // sanity: refuse junk replies (too short or structure-destroying)
-        const okLen = rewritten.length >= Math.max(20, plain.length * 0.4);
-        if (okLen) next = applyModelToTextNodes(next, rewritten);
+        const rewritten = await humanizeWithModel(cfg, lines.join('\n'), kind, signal);
+        const replacements = rewritten.split(/\r?\n/).map(line => applyRules(line.trim()));
+        if (replacements.length === spans.length && replacements.every(Boolean)) next = renderCopy(src, spans, replacements);
         else hooks.onNote?.('humanizer model pass skipped: reply looked wrong');
       } else {
         const rewritten = await humanizeWithModel(cfg, next, kind, signal);
@@ -104,36 +151,25 @@ export async function humanizeFile(cfg, absPath, signal, hooks = {}) {
         else hooks.onNote?.('humanizer model pass skipped: reply looked wrong');
       }
       // final sanitization: the model pass may reintroduce cliches or em dashes
-      next = isHtml ? humanizeHtmlTextNodes(next, applyRules) : applyRules(next);
+      if (!isHtml) next = applyRules(next);
     } catch (err) {
       hooks.onNote?.(`humanizer model pass skipped: ${err.message}`);
     }
   }
 
   if (next !== src && next.trim()) {
-    fs.writeFileSync(absPath, next);
+    if (!safe()) return { changed: false, reason: 'path changed or task stopped' };
+    // Pin the existing file. Never recreate a deleted document or write via a
+    // reopened path after comparing the snapshot.
+    const fd = fs.openSync(absPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      if (fs.readFileSync(fd, 'utf8') !== src) return { changed: false, reason: 'file changed' };
+      const bytes = Buffer.from(next);
+      let pos = 0;
+      while (pos < bytes.length) pos += fs.writeSync(fd, bytes, pos, bytes.length - pos, pos);
+      fs.ftruncateSync(fd, bytes.length);
+    } finally { fs.closeSync(fd); }
     return { changed: true, before, after: next };
   }
   return { changed: false, reason: 'already clean' };
-}
-
-function stripTagsForPrompt(html) {
-  return html.replace(/<[^>]+>/g, '\n').replace(/\n{2,}/g, '\n').trim();
-}
-
-// Map model-rewritten plain text back onto HTML text nodes: greedy line pairing.
-// Structure is preserved; if pairing fails, the node text is left unchanged.
-function applyModelToTextNodes(html, modelText) {
-  const lines = modelText.split('\n').map(l => l.trim()).filter(Boolean);
-  let li = 0;
-  return html.replace(/>([^<>]+)</g, (m, text) => {
-    const trimmed = text.trim();
-    if (li < lines.length && /[a-zA-Z]/.test(trimmed) && trimmed.length > 2) {
-      const candidate = lines[li++];
-      if (candidate && candidate !== trimmed && candidate.length > 2) {
-        return '>' + text.replace(trimmed, candidate) + '<';
-      }
-    }
-    return m;
-  });
 }

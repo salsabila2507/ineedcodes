@@ -21,6 +21,8 @@ npm install -g ineedcodes
 
 Works on Linux, macOS, and Windows (PowerShell and cmd). Needs Node.js 20 or newer.
 
+Optional memory on Windows uses `icm.exe` on `PATH`. For a Node-based ICM install, set `INEED_ICM_PATH` to its absolute JavaScript entry point. Batch launchers are not used.
+
 ## First open
 
 Bring your own key (BYOK). The first run offers a short provider menu; it never silently defaults to a locked gateway.

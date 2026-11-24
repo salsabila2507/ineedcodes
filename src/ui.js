@@ -300,6 +300,7 @@ export function makeInput(rl, onLine, onPending = null) {
   let closed = false;
   const queue = [];
   const CANCEL = Symbol('sigint');
+  const EOF = Symbol('eof');
   // Right after a line is delivered, the code that asked for it resumes in a
   // microtask, while readline emits the next buffered line synchronously. A
   // pasted or piped burst would therefore feed question 2 with question 3's
@@ -327,7 +328,7 @@ export function makeInput(rl, onLine, onPending = null) {
   });
   rl.on('close', () => {
     closed = true;
-    if (pending) { const r = pending; pending = null; r(''); }
+    if (pending) { const r = pending; pending = null; r(EOF); }
   });
   // Ctrl+C while a question is pending CANCELS that question: the ask()
   // promise rejects with {aborted:true}. Without this the caller was left
@@ -337,7 +338,7 @@ export function makeInput(rl, onLine, onPending = null) {
     if (pending) { const r = pending; pending = null; r(CANCEL); }
   });
 
-  const ask = (q, { secret = false } = {}) => new Promise((res, rej) => {
+  const ask = (q, { secret = false, onEof = '' } = {}) => new Promise((res, rej) => {
     process.stdout.write(q + ' ');
     let prevEcho = null;
     if (secret && process.stdin.isTTY) {
@@ -351,10 +352,10 @@ export function makeInput(rl, onLine, onPending = null) {
       if (secret) process.stdout.write('\n');
       if (wasPending) { wasPending = false; onPending?.(false); }
       if (v === CANCEL) rej(Object.assign(new Error('Cancelled.'), { aborted: true }));
-      else res(v);
+      else res(v === EOF ? onEof : v);
     };
     if (queue.length > 0) deliver(queue.shift());
-    else if (closed) deliver('');
+    else if (closed) deliver(EOF);
     else { pending = deliver; wasPending = true; onPending?.(true); }
   });
 

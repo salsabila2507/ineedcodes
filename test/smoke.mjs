@@ -70,6 +70,15 @@ function mock(script) {
         res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'MIXED-OK' } }] }) + 'data: [DONE]\n\n');
         return;
       }
+      if (script === 'markers') return send(200, reply('Literal data: and event: in JSON.'));
+      if (script === 'privateblocks') {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        for (const content of [[{ type: 'thinking', thinking: 'PRIVATE-BLOCK' }],
+          { type: 'reasoning', text: 'PRIVATE-BLOCK' }, [{ type: 'text', text: 'VISIBLE-ANSWER' }]]) {
+          res.write('data: ' + JSON.stringify({ choices: [{ delta: { content } }] }) + '\n\n');
+        }
+        return res.end('data: [DONE]\n\n');
+      }
       // some routers stream even when stream was not asked for
       if (script === 'sse') {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -338,7 +347,7 @@ function mock(script) {
           break;
         }
         case 'proc': {
-          if (!hadTools) resp = call('process_start', { name: 'srv', command: 'echo srv-started' });
+          if (!hadTools) resp = call('process_start', { name: 'srv', command: 'echo srv-started && node -e "setInterval(() => {}, 1000)"' });
           else if (toolResults.length === 1) resp = call('process_status', {});
           else if (toolResults.length === 2) resp = call('process_output', { name: 'srv' });
           else if (toolResults.length === 3) resp = call('process_stop', { name: 'srv' });
@@ -659,6 +668,8 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   });
   const file = path.join(work, 'ok.txt');
   check('perm: n denies the edit in session', code === 0 && !fs.existsSync(file) && out.includes('denied.'), out);
+  const eof = await run([], { cwd: work, input: 'make ok.txt\n' });
+  check('perm: closed input is not an Enter approval', !fs.existsSync(file) && eof.out.includes('denied.'), eof.out);
   server.close();
 }
 {
@@ -740,21 +751,17 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 {
   const fakeBin = path.join(TMP, 'fakebin');
   fs.mkdirSync(fakeBin, { recursive: true });
-  // one shared node shim + two launchers, so the fake `icm` works on every OS:
-  // POSIX resolves the shebang script, Windows (shell:true) needs an .cmd
+  // Invoke the fixture directly with Node, without a command shell.
   fs.writeFileSync(path.join(fakeBin, 'icm-shim.js'), [
     'const a = process.argv[2] ?? "";',
     'if (a === "recall") console.log("3 | FAKE-MEMORY-MARKER durable fact from previous session");',
     'else if (a === "remember") console.log("stored");',
     'else console.log("icm");'
   ].join('\n'));
-  fs.writeFileSync(path.join(fakeBin, 'icm'), '#!/bin/sh\nexec node "$(dirname "$0")/icm-shim.js" "$@"\n');
-  fs.writeFileSync(path.join(fakeBin, 'icm.cmd'), '@echo off\r\nnode "%~dp0icm-shim.js" %*\r\n');
-  try { fs.chmodSync(path.join(fakeBin, 'icm'), 0o755); } catch {}
   const { server, port } = await mock('memory');
   fs.mkdirSync(CFG, { recursive: true });
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', memory: true }), { mode: 0o600 });
-  const { code, out } = await run(['do a thing'], { fakePath: fakeBin, memory: true });
+  const { code, out } = await run(['recall the project notes'], { env: { INEED_ICM_PATH: path.join(fakeBin, 'icm-shim.js') }, memory: true });
   check('memory: recalled fact reaches model context', code === 0 && out.includes('MEMORY-VERIFIED'), out);
   server.close();
 }
@@ -1144,6 +1151,23 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('provider: JSON body with a stream trailer is parsed', code === 0 && out.includes('MIXED-OK'), out.slice(-300));
   server.close();
 }
+{
+  const { code, out } = await oneShot('markers', 'say hi', { stream: false });
+  check('provider: markers inside JSON are literal text', code === 0 && out.includes('Literal data: and event: in JSON.'), out);
+}
+{
+  const { chat } = await import('../src/provider.js');
+  const { server, port } = await mock('privateblocks');
+  try {
+    for (const stream of [true, false]) {
+      const deltas = [];
+      const msg = await chat({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini', stream },
+        [{ role: 'user', content: 'say hi' }], [], undefined, chunk => deltas.push(chunk));
+      check('provider: private blocks stay out of replies and deltas (stream=' + stream + ')',
+        msg.content === 'VISIBLE-ANSWER' && deltas.join('') === (stream ? 'VISIBLE-ANSWER' : ''));
+    }
+  } finally { server.close(); }
+}
 
 // ── real terminal: bracketed paste is staged, not run (needs a pty) ──
 if (process.platform !== 'win32' && spawnSync('script', ['--version']).status === 0) {
@@ -1294,6 +1318,9 @@ if (process.platform !== 'win32' && spawnSync('script', ['--version']).status ==
   const refused = ['.env', 'id_rsa', 'credentials.json', 'secrets.yaml', '.npmrc']
     .every(n => String(runTool('read_file', { path: n }, work).output).startsWith('Refused'));
   const copiedBlocked = String(runTool('copy_file', { path: '.env', to: 'leak.txt' }, work).output).startsWith('Refused');
+  fs.writeFileSync(path.join(work, 'notes.txt'), 'VISIBLE_FIXTURE');
+  const search = runTool('search_text', { pattern: '/SECRET_VALUE_HERE|VISIBLE_FIXTURE/' }, work);
+  check('search: ordinary files found, credential files omitted', search.output.includes('VISIBLE_FIXTURE') && !search.output.includes('SECRET_VALUE_HERE'));
   check('audit: secret files refuse every read and copy path', refused && copiedBlocked,
     JSON.stringify(runTool('read_file', { path: '.env' }, work).output));
 }
@@ -1786,6 +1813,66 @@ fs.rmSync(CFG, { recursive: true, force: true });
   check('git noise: repo pins LF line endings', /\*\s+text=auto\s+eol=lf/.test(ga), ga);
 }
 
+{
+  const { humanizeFile } = await import('../src/humanize.js');
+  const file = path.join(TMP, 'long-document.md');
+  const original = 'A cutting-edge guide.\n'.repeat(410) + 'END-OF-DOCUMENT\n';
+  fs.writeFileSync(file, original);
+  await humanizeFile({}, file, undefined, { root: TMP });
+  check('humanizer: long document preserved byte for byte', fs.readFileSync(file, 'utf8') === original);
+
+  const latest = 'A cutting-edge guide with edits that must survive.';
+  fs.writeFileSync(file, latest);
+  await humanizeFile({}, file, undefined, { root: TMP, expected: 'earlier version' });
+  check('humanizer: stale rewrite cannot replace newer contents', fs.readFileSync(file, 'utf8') === latest);
+}
+{
+  const { chat } = await import('../src/provider.js');
+  const original = globalThis.fetch;
+  try {
+    for (const stream of [false, true]) {
+      const ctrl = new AbortController();
+      let cancelled = false;
+      globalThis.fetch = async () => new Response(new ReadableStream({
+        pull() { setImmediate(() => ctrl.abort('test-stop')); },
+        cancel() { cancelled = true; }
+      }));
+      let stopped = false;
+      try { await chat({ baseUrl: 'http://fixture.invalid', model: 'fixture', stream }, [], [], ctrl.signal); }
+      catch (err) { stopped = err.stopped && err.reason === 'test-stop'; }
+      check('provider: cancellation reaches pending body reader (stream=' + stream + ')', stopped && cancelled);
+    }
+  } finally { globalThis.fetch = original; }
+}
+{
+  const { humanizeFile } = await import('../src/humanize.js');
+  const { chat } = await import('../src/provider.js');
+  const file = path.join(TMP, 'copy-spans.html');
+  const src = '<style>.x{color:red}</style><script>const x="seamless";</script><p title="a > b">Visible copy</p><!-- unchanged -->';
+  const originalFetch = globalThis.fetch;
+  const cfg = { apiKey: 'fixture', baseUrl: 'http://fixture.invalid', model: 'fixture' };
+  try {
+    let prompt;
+    fs.writeFileSync(file, src);
+    globalThis.fetch = async (_, opts) => {
+      prompt = JSON.parse(opts.body).messages[0].content;
+      return Response.json({ choices: [{ message: { role: 'assistant', content: 'Fresh <copy> & more' } }] });
+    };
+    await humanizeFile(cfg, file, undefined, { root: TMP });
+    check('HTML: only copy sent; model punctuation stays text; markup unchanged',
+      prompt.endsWith('\nVisible copy') && !prompt.includes('color:red') && !prompt.includes('const x=') &&
+      fs.readFileSync(file, 'utf8') === src.replace('Visible copy', 'Fresh &lt;copy&gt; &amp; more'));
+    const events = [[{ index: 1, id: 'b', function: { name: 'second', arguments: '{' } }],
+      [{ index: 0, id: 'a', function: { name: 'fir', arguments: '{"k":' } }],
+      [{ index: 0, function: { name: 'st', arguments: '1}' } }, { index: 1, function: { arguments: '}' } }]];
+    globalThis.fetch = async () => new Response(events.map(tool_calls => 'data: ' + JSON.stringify({ choices: [{ delta: { tool_calls } }] })).join('\n\n') + '\n\ndata: [DONE]\n\n');
+    for (const stream of [true, false]) {
+      const msg = await chat({ ...cfg, stream }, [], []);
+      check('provider: interleaved fragments stay with their call (stream=' + stream + ')',
+        JSON.stringify(msg.tool_calls.map(c => [c.id, c.function.name, c.function.arguments])) === JSON.stringify([['a','first','{"k":1}'],['b','second','{}']]));
+    }
+  } finally { globalThis.fetch = originalFetch; }
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
