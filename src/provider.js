@@ -138,9 +138,9 @@ export async function fetchModels(cfg, signal) {
 
 // human guidance for the status codes a hosted gateway actually returns
 function httpHint(status) {
-  if (status === 401 || status === 403) return ' - API key rejected or not allowed here. Replace it: /provider add <name>, or check your key.';
-  if (status === 402) return ' - this key is out of credit. Top up in the provider dashboard, or use another provider: /provider';
-  if (status === 404) return ' - API address not found. Check the base URL, it usually ends with /v1. See: /config';
+  if (status === 401 || status === 403) return ' - API key rejected or not allowed here. Run: ineed provider (or /provider in-session), or check your key.';
+  if (status === 402) return ' - this key is out of credit. Top up in the provider dashboard, or switch: ineed provider (or /provider in-session)';
+  if (status === 404) return ' - API address not found. Check the base URL, it usually ends with /v1. See: ineed provider (or /config in-session)';
   if (status === 429) return ' - too many requests. Wait a moment and try again.';
   if (status >= 500) return ' - the provider is having trouble. Try again in a little while.';
   return '';
@@ -166,7 +166,7 @@ function retryAfterMs(res) {
 function modelHint(status, text) {
   if (!/model/i.test(String(text))) return '';
   if (status === 404 || status === 400 || status === 422) {
-    return ' - this model does not exist at that provider. Switch: /provider (the list is pulled again), or /model';
+    return ' - this model does not exist at that provider. Switch: ineed provider (or /provider in-session), or /model';
   }
   return '';
 }

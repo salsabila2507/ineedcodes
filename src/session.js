@@ -746,9 +746,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         const overwrites = (name === 'write_file' || name === 'copy_file' || name === 'move_file') && input2?.path
           && fs.existsSync(path.resolve(process.cwd(), String(input2.path))) ? T.warning('  (overwrites an existing file)') : '';
         say(T.warning('  ⚠ approval needed') + ' ' + T.command(name) + T.muted(' ' + detail) + overwrites);
-        const a = await ask('     [y] once · [a] this session · [s] always (save) · [n] no: ');
+        const a = await ask('     [y] once (Enter) · [a] this session · [s] always (save) · [n] no: ');
         const c = a.trim().toLowerCase();
-        if (c === 's' || c === 'save') {
+        if (c === 's' || c === 'save' || c === 'simpan') {
           approved.add(cat);
           if (cat === 'edit') Object.assign(state, normalize({ ...state, permEdit: 'allow' }));
           if (cat === 'shell') Object.assign(state, normalize({ ...state, permShell: 'allow' }));
@@ -756,8 +756,12 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           say(T.muted('     always allowed, saved to config. /perm safe to undo.'));
           return 'always';
         }
-        if (c === 'a' || c === 'always') { approved.add(cat); say(T.muted('     always allowed for this session.')); return 'always'; }
-        if (c === 'y' || c === 'yes') return true;
+        if (c === 'a' || c === 'always' || c === 'semua') { approved.add(cat); say(T.muted('     always allowed for this session.')); return 'always'; }
+        if (c === '' || c === 'y' || c === 'yes' || c === 'ya') return true;
+        if (c === 'n' || c === 'no' || c === 'tidak' || c === 'batal' || c === 'cancel') {
+          say(T.muted('     denied.'));
+          return false;
+        }
         say(T.muted('     denied.'));
         return false;
       },
@@ -926,7 +930,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say('  ' + cyan('/reset') + '    clear saved config');
       say('  ' + cyan('/help') + '     this list. Type normally to work, steer mid-task anytime');
       say(dim('  while a task runs: your text is a live steer, /stop cancels it'));
-      say('  ' + cyan('/exit') + '     quit');
+      say('  ' + cyan('/exit') + '     quit (or type q, keluar)');
+      say(dim('  tip: perintah bisa tanpa slash (contoh: provider, model, perm auto, cls, keluar)'));
     },
     // one guided menu instead of a wall of toggles: six things a beginner
     // actually cares about, each a numbered choice in plain language
@@ -1062,7 +1067,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       } else {
         say(dim('Conversation forgotten.'));
       }
-    }
+    },
+    '/cls': async () => commands['/clear'](),
+    '/bantuan': () => commands['/help'](),
+    '/keluar': () => doExit()
   };
 
     // every dispatch path fires handle() without awaiting it, so it must never
@@ -1091,8 +1099,9 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(dim('  ↳ steer noted, applying it now...'));
       return;
     }
-    if (['/exit', '/quit', 'exit', 'quit'].includes(input)) return doExit();
-    if (input === '/help' || input === '?') return commands['/help']();
+    if (['/exit', '/quit', 'exit', 'quit', 'q', ':q', ':q!', 'bye', 'keluar', '/keluar'].includes(input)) return doExit();
+    if (input === '/help' || input === '?' || input === '/bantuan' || input === 'bantuan') return commands['/help']();
+    if (input === '/clear' || input === '/cls' || input === 'cls') return commands['/clear']();
     if (input === '/theme' || input.startsWith('/theme ')) { busy = true; try { await commands['/theme'](input.slice(6).trim()); } finally { busy = false; } return afterTask(); }
     if (input === '/config' || input === '/config show') { busy = true; try { await commands['/config'](''); } finally { busy = false; } return afterTask(); }
     if (input.startsWith('/config ')) {
@@ -1555,23 +1564,54 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     return runTask(input);
   }
 
-  // exact single words (plus one argument for provider/model) map to commands;
+  // exact single words (plus arguments for provider/model/perm/theme/etc) map to commands;
   // anything longer stays a real task, because "plan my week" is not a command
   function shortcutCommand(text) {
-    const parts = String(text).trim().split(/\s+/);
+    const raw = String(text).trim();
+    if (!raw) return null;
+    const parts = raw.split(/\s+/);
     const word = parts[0].toLowerCase();
     const rest = parts.slice(1).join(' ');
+
+    const lower = raw.toLowerCase();
+    if (lower === 'ganti model' || lower === 'pilih model') return '/model';
+    if (lower === 'ganti provider' || lower === 'pilih provider') return '/provider';
+
     const one = {
       help: '/help', '?': '/help', help2: '/help',
-      status: '/status', model: '/model', provider: '/provider',
+      status: '/status', model: '/model', models: '/model',
+      provider: '/provider', providers: '/provider',
       memory: '/memory', humanizer: '/humanizer', perm: '/perm', permission: '/perm', izin: '/perm',
       plan: '/plan', build: '/build', depth: '/depth', reason: '/reason',
-      theme: '/theme', skills: '/skills', init: '/init', compact: '/compact',
-      new: '/new', clear: '/clear', reset: '/reset', setup: '/setup',
-      exit: '/exit', quit: '/exit', stop: '/stop', mcp: '/mcp', boost: '/boost'
+      theme: '/theme', tema: '/theme', skills: '/skills', init: '/init', compact: '/compact',
+      new: '/new', clear: '/clear', cls: '/clear', bersihkan: '/clear',
+      reset: '/reset', setup: '/setup', config: '/config',
+      exit: '/exit', quit: '/exit', q: '/exit', ':q': '/exit', ':q!': '/exit',
+      keluar: '/exit', bye: '/exit', stop: '/stop', mcp: '/mcp', boost: '/boost',
+      bantuan: '/help', menu: '/help', tolong: '/help'
     };
     if (one[word] && !rest) return one[word];
-    if ((word === 'provider' || word === 'model') && rest) return '/' + word + ' ' + rest;
+
+    const withArgs = {
+      provider: '/provider',
+      providers: '/provider',
+      model: '/model',
+      models: '/model',
+      perm: '/perm',
+      permission: '/perm',
+      izin: '/perm',
+      theme: '/theme',
+      tema: '/theme',
+      reason: '/reason',
+      depth: '/depth',
+      memory: '/memory',
+      humanizer: '/humanizer',
+      skills: '/skills',
+      boost: '/boost',
+      resume: '/resume',
+      config: '/config'
+    };
+    if (withArgs[word] && rest) return withArgs[word] + ' ' + rest;
     return null;
   }
 
@@ -1667,6 +1707,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     { cmd: '/resume', desc: 'resume a saved session' },
     { cmd: '/new', desc: 'start a fresh session' },
     { cmd: '/clear', desc: 'forget this conversation' },
+    { cmd: '/cls', desc: 'clear conversation (same as /clear)' },
     { cmd: '/setup', desc: 'redo provider setup' },
     { cmd: '/help', desc: 'all commands' },
     { cmd: '/exit', desc: 'quit' }

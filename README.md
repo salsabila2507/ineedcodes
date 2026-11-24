@@ -132,16 +132,15 @@ The agent decides what it needs: list files, read code, search, edit, run shell 
 | `/clear` | forget this conversation (asks before deleting the saved copy) |
 | `/exit` | quit |
 
-Shortcuts are optional. Normal language always works, and the common ones work
-without the slash: type `status`, `provider`, `model`, `help`, or `plan` and they
-run like the command above.
+Shortcuts are optional. Normal language always works, and common commands work
+without the slash: `help`, `status`, `provider`, `model`, `perm auto`, `cls` (clear screen), `keluar` / `q` (exit).
 
 ## Safety, in plain words
 
 - The agent works **inside the folder you started it in**. Files outside it are refused.
 - `.env`, `.ssh/`, and `.git/` are never read or written, so keys cannot leak into the model.
 - Destructive commands (`rm -rf`, `git reset --hard`, `git clean`, force push, `curl ... | sh`) are blocked. You run those yourself.
-- Edits and shell commands ask first, unless you allow them for the session: `[y] once`, `[a] allow everything this run`, `[n] no`.
+- Edits and shell commands ask first: `[y] once (Enter)`, `[a] this session`, `[s] always (save)`, `[n] no`. Pressing Enter approves once by default.
 - One-shot runs (`ineed "task"`) without a terminal run unattended, and they say so before starting.
 
 ## When something goes wrong

@@ -13,12 +13,12 @@ const args = process.argv.slice(2);
 const { loadConfig } = await import('./config.js');
 const { VERSION, bold, dim, red, green, yellow, cyan, box } = await import('./ui.js');
 
-if (args[0] === '--version' || args[0] === '-v') {
+if (args[0] === '--version' || args[0] === '-v' || (args[0] === 'version' && args.length === 1)) {
   console.log(`ineed ${VERSION}`);
   process.exit(0);
 }
 
-if (args[0] === '--help' || args[0] === '-h') {
+if (args[0] === '--help' || args[0] === '-h' || (args[0] === 'help' && args.length === 1)) {
   console.log(`
 ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
 
@@ -30,11 +30,11 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
   ${green('ineed --reset')}               ${dim('HAPUS semua provider+key, lalu setup ulang')}
 
   ${bold('Lainnya')}
-  ${green('ineed --help, -h')}            ${dim('t bantuan ini')}
-  ${green('ineed --version, -v')}         ${dim('t versi')}
+  ${green('ineed --help, -h')}            ${dim('lihat bantuan ini')}
+  ${green('ineed --version, -v')}         ${dim('lihat versi')}
 
   ${dim('Di dalam sesi: /help buat daftar perintah.')}
-  ${dim('Mengetik "provider" atau "help" tanpa slash juga jalan.')}
+  ${dim('Mengetik perintah tanpa slash juga bisa (contoh: provider, model, help, cls, keluar).')}
 `);
   process.exit(0);
 }
@@ -275,9 +275,9 @@ if (args[0] === '--child') {
       approved,
       onApprove: async (cat, name, input) => {
         if (!canAsk) return true;
-        const a = (await ask(`  allow ${name}${input?.command ? ': ' + String(input.command).slice(0, 90) : input?.path ? ': ' + input.path : ''}? [y] once · [a] allow all this run · [n] no: `)).trim().toLowerCase();
-        if (a === 'a' || a === 'all') { approved.add(cat); return 'always'; }
-        if (a === 'y' || a === 'yes') return true;
+        const a = (await ask(`  allow ${name}${input?.command ? ': ' + String(input.command).slice(0, 90) : input?.path ? ': ' + input.path : ''}? [y] once (Enter) · [a] allow all this run · [n] no: `)).trim().toLowerCase();
+        if (a === 'a' || a === 'all' || a === 'semua') { approved.add(cat); return 'always'; }
+        if (a === '' || a === 'y' || a === 'yes' || a === 'ya') return true;
         return false;
       }
     });

@@ -425,7 +425,9 @@ function run(args, { input = '', cwd = TMP, port = 0, cfg = {}, staged = null, f
 
 // ── CLI basics ──
 { const { code, out } = await run(['--version']); check('--version prints version', code === 0 && out.includes('ineed ' + VERSION), out); }
+{ const { code, out } = await run(['version']); check('version bare command prints version', code === 0 && out.includes('ineed ' + VERSION), out); }
 { const { code, out } = await run(['--help']); check('--help prints usage', code === 0 && out.includes('--reset') && out.includes('-h') && out.includes('tanpa slash'), out); }
+{ const { code, out } = await run(['help']); check('help bare command prints usage', code === 0 && out.includes('--reset') && out.includes('lihat bantuan ini'), out); }
 
 // ── reset before any config exists: clears, then opens setup; full setup succeeds ──
 fs.rmSync(CFG, { recursive: true, force: true });
@@ -677,6 +679,23 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const f2 = path.join(work, 'again.txt');
   const askCount = (out.match(/approval needed/g) || []).length;
   check('perm: a grants for the session (second edit never asks)', code === 0 && fs.existsSync(f1) && fs.existsSync(f2) && askCount === 1, 'asks=' + askCount + ' | ' + out.slice(-300));
+  server.close();
+}
+{
+  const { server, port } = await mock('approve');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const work = fs.mkdtempSync(path.join(TMP, 'perm-'));
+  const { code, out } = await run([], {
+    cwd: work,
+    staged: [
+      { when: '', send: 'make ok.txt', immediate: true },
+      { when: 'approval needed', send: '' },
+      { when: 'APPROVAL-GRANTED', send: '/exit' }
+    ]
+  });
+  const file = path.join(work, 'ok.txt');
+  check('perm: Enter (empty input) allows once by default', code === 0 && fs.existsSync(file) && out.includes('APPROVAL-GRANTED'), out);
   server.close();
 }
 
@@ -1102,9 +1121,11 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const { server, port } = await mock('default');
   fs.mkdirSync(CFG, { recursive: true });
   fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
-  const out = await run([], { input: 'help\nstatus\n/exit\n' });
+  const out = await run([], { input: 'help\nstatus\ncls\nperm auto\nkeluar\n' });
   check('session: "help" and "status" work without a slash',
     out.code === 0 && out.out.includes('Current status') && out.out.includes('/help'), out.out.slice(-400));
+  check('session: shortcuts "cls", "perm auto", and "keluar" work without a slash',
+    out.code === 0 && out.out.includes('Permissions: edits and shell run without asking.') && out.out.includes('Goodbye.'), out.out.slice(-400));
   server.close();
 }
 
