@@ -2268,6 +2268,20 @@ fs.rmSync(CFG, { recursive: true, force: true });
     check('acp: permission ' + name + ' answers cancelled', ans?.result?.outcome?.outcome === 'cancelled', JSON.stringify(ans));
   }
 
+  // two questions at once are asked one after the other, and both get an answer
+  {
+    let active = 0, most = 0;
+    const asked = [];
+    const seen = [];
+    const s = await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env('double'),
+      onUpdate: u => { const d = acp.describeUpdate(u); if (d?.stream) seen.push(d.text); },
+      onPermission: async p => { active++; most = Math.max(most, active); asked.push(p.toolCall.title); await new Promise(r => setTimeout(r, 50)); active--; return p.toolCall.title === 'one' ? 'y' : 'n'; } });
+    await s.agent.prompt('x');
+    s.agent.stop();
+    check('acp: concurrent permission requests are asked one at a time and both answered',
+      most === 1 && asked.join() === 'one,two' && seen.join('') === 'BOTH:y,n', JSON.stringify({ most, asked, seen }));
+  }
+
   // auth_required: sign in through authenticate, then the session opens
   fs.rmSync(logFile, { force: true });
   let offered = null;
@@ -2329,11 +2343,17 @@ if (process.platform !== 'win32') {
     check('cli acp: permissions set to allow in /config answer allow_always', code === 0 && out.includes('PERM:ok-always'), out);
   }
   {
+    fs.writeFileSync(path.join(bin, 'agy'), '#!/bin/sh\nexec "' + process.execPath + '" "' + path.join(ROOT, 'test', 'fixtures', 'fake-acp.mjs') + '"\n', { mode: 0o755 });
+    const { code, out } = await run(['acp', 'antigravity', 'go'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
+    check('cli acp: Antigravity refuses to run without a person at a terminal', code === 1 && out.includes('only runs when you type') && !out.includes('ECHO:'), out);
+  }
+  {
     const { code, out } = await run(['acp', 'opencode'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
     check('cli acp: chat without a terminal asks for a task instead of hanging', code === 1 && out.includes('ineed acp opencode'), out);
   }
   fs.rmSync(path.join(CFG, 'config.json'), { force: true });
 }
-fs.rmSync(TMP, { recursive: true, force: true });
+// Windows can still hold a folder for a moment after a child exits
+fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

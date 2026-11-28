@@ -55,13 +55,17 @@ export function detect(agents = AGENTS, { home = os.homedir(), has = onPath, exi
 // One agent process, one session. Requests are matched to responses by id, and
 // notifications (session/update) are handed to onUpdate as they arrive.
 export function startAgent({ command, args = [], cwd, env = process.env, onUpdate = () => {}, onPermission, terminalAuth = false } = {}) {
-  const child = spawn(command, args, { cwd, env: { ...env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'], shell: WIN, windowsHide: true });
+  // a bare name on Windows may be an npm .cmd shim, which only starts through a shell;
+  // a full path (agy.exe in a folder with spaces) starts directly
+  const child = spawn(command, args, { cwd, env: { ...env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'], shell: WIN && !/[\\/]/.test(command), windowsHide: true });
   const pending = new Map();
   let nextId = 1;
   let sessionId = null;
   let stderr = '';
   let dead = null;
   let cancelled = false;
+  // one permission question at a time: a second one waits for the first answer
+  let permissionChain = Promise.resolve();
 
   const send = message => {
     if (dead) return;
@@ -80,11 +84,16 @@ export function startAgent({ command, args = [], cwd, env = process.env, onUpdat
     if (method === 'session/request_permission') {
       const options = params?.options ?? [];
       let pick = null;
-      try {
-        pick = onPermission
-          ? await onPermission(params)
-          : (options.find(o => o.kind === 'allow_always') ?? options.find(o => o.kind === 'allow_once'))?.optionId;
-      } catch { pick = null; }
+      const turn = permissionChain.then(async () => {
+        if (cancelled) return;
+        try {
+          pick = onPermission
+            ? await onPermission(params)
+            : (options.find(o => o.kind === 'allow_always') ?? options.find(o => o.kind === 'allow_once'))?.optionId;
+        } catch { pick = null; }
+      });
+      permissionChain = turn;
+      await turn;
       // no answer, or an answer that is not one of the offered options, is a cancel: never guess "allow"
       const option = cancelled ? null : options.find(o => o.optionId === pick);
       return send(option

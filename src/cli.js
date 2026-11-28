@@ -206,6 +206,11 @@ if (args[0] === 'acp') {
   if (agent.personOnly) console.log(yellow('  Note: Google allows ' + agent.name + ' here only while you drive the chat yourself. Never use it from ineed serve, ineed telegram or scripts, or your Google account can be suspended.'));
   const cfg = loadConfig() ?? {};
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (agent.personOnly && !interactive) {
+    console.error(red('  ' + agent.name + ' only runs when you type in a terminal yourself, not from a script or a pipe.'));
+    console.error(dim('  Google suspends accounts used through automation. Use another agent (for example opencode) for scripts.'));
+    process.exit(1);
+  }
   let rl = null, ask = null;
   const readline = await import('node:readline');
   const { makeInput } = await import('./ui.js');

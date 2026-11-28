@@ -42,6 +42,12 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       return reply({ sessionId: 'sess_fake_1' });
     case 'session/prompt': {
       const sid = msg.params.sessionId;
+      if (mode === 'double') {
+        const opts = [{ optionId: 'y', name: 'Allow', kind: 'allow_once' }, { optionId: 'n', name: 'Reject', kind: 'reject_once' }];
+        const both = await Promise.all(['one', 'two'].map(title => ask('session/request_permission', { sessionId: sid, toolCall: { toolCallId: title, title }, options: opts })));
+        update(sid, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'BOTH:' + both.map(b => b.result?.outcome?.optionId ?? b.result?.outcome?.outcome).join(',') } });
+        return reply({ stopReason: 'end_turn' });
+      }
       const text = msg.params.prompt.map(b => b.text).join('');
       // an unrelated notification the client must not answer
       send({ jsonrpc: '2.0', method: '_fake/ping', params: {} });
