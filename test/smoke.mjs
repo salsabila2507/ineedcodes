@@ -939,9 +939,10 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
 // ── web: fetch_url + honest search ──
 {
   const { default: http } = await import('node:http');
-  const webPort = 58888;
   const wsrv = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><h1>FAKE-WEB-CONTENT</h1></body></html>'); });
-  await new Promise(r => wsrv.listen(webPort, '127.0.0.1', r));
+  // any free port: a fixed one collides with whatever else the machine runs
+  await new Promise(r => wsrv.listen(0, '127.0.0.1', r));
+  const webPort = wsrv.address().port;
   process.env.FAKE_WEB_PORT = String(webPort);
   const { code, out } = await oneShot('webfetch', 'fetch the page');
   check('web: fetch_url reads a page', code === 0 && out.includes('WEBFETCH-VERIFIED'), out.slice(-300));

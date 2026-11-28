@@ -209,34 +209,41 @@ export function runTerminalLogin({ command, args = [], cwd, method, env = proces
 // Start the agent and open a session, signing in when the agent asks for it.
 // chooseAuth(methods) returns the method to use, or null to give up; it is only
 // asked when session/new fails with auth_required.
-// aroundLogin wraps the interactive login so the caller can hand it the keyboard.
 export async function connect({ command, args = [], cwd, onUpdate, onPermission, chooseAuth = null, terminalAuth = false, aroundLogin = f => f(), env }) {
-  let agent = startAgent({ command, args, cwd, env, onUpdate, onPermission, terminalAuth });
-  let info = await agent.initialize();
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await agent.newSession(cwd);
-      return { agent, info };
-    } catch (err) {
-      if (err?.code !== AUTH_REQUIRED) { agent.stop(); throw err; }
-      // a terminal login is the agent's own sign-in screen, the most reliable choice, so it goes first
-      const methods = (info.authMethods ?? []).filter(m => authKind(m) === 'agent' || (terminalAuth && authKind(m) === 'terminal'))
-        .sort((x, y) => (authKind(y) === 'terminal') - (authKind(x) === 'terminal'));
-      const method = attempt < 2 && methods.length && chooseAuth ? await chooseAuth(methods) : null;
-      if (!method) {
-        agent.stop();
-        const names = (info.authMethods ?? []).map(m => m.name ?? m.id).join(', ');
-        throw Object.assign(new Error('the agent needs you to sign in first' + (names ? ` (it offers: ${names})` : '')), { code: AUTH_REQUIRED, authMethods: info.authMethods ?? [] });
-      }
-      if (authKind(method) === 'terminal') {
-        agent.stop();
-        if (!(await aroundLogin(() => runTerminalLogin({ command, args, cwd, method, env })))) throw Object.assign(new Error('sign-in did not finish'), { code: AUTH_REQUIRED });
-        agent = startAgent({ command, args, cwd, env, onUpdate, onPermission, terminalAuth });
-        info = await agent.initialize();
-      } else {
-        await agent.authenticate(method.id).catch(e => { agent.stop(); throw e; });
+  const launch = () => startAgent({ command, args, cwd, env, onUpdate, onPermission, terminalAuth });
+  let agent = launch();
+  try {
+    let info = await agent.initialize();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await agent.newSession(cwd);
+        return { agent, info };
+      } catch (err) {
+        if (err?.code !== AUTH_REQUIRED) throw err;
+        // a terminal login is the agent's own sign-in screen, the most reliable choice, so it goes first
+        const methods = (info.authMethods ?? []).filter(m => authKind(m) === 'agent' || (terminalAuth && authKind(m) === 'terminal'))
+          .sort((x, y) => (authKind(y) === 'terminal') - (authKind(x) === 'terminal'));
+        const method = attempt < 2 && methods.length && chooseAuth ? await chooseAuth(methods) : null;
+        if (!method) {
+          const names = (info.authMethods ?? []).map(m => m.name ?? m.id).join(', ');
+          throw Object.assign(new Error('the agent needs you to sign in first' + (names ? ` (it offers: ${names})` : '')), { code: AUTH_REQUIRED, authMethods: info.authMethods ?? [] });
+        }
+        if (authKind(method) === 'terminal') {
+          agent.stop();
+          if (!(await aroundLogin(() => runTerminalLogin({ command, args, cwd, method, env })))) {
+            throw Object.assign(new Error('sign-in did not finish'), { code: AUTH_REQUIRED });
+          }
+          agent = launch();
+          info = await agent.initialize();
+        } else {
+          await agent.authenticate(method.id);
+        }
       }
     }
+  } catch (err) {
+    // a failed handshake must never leave the agent running
+    agent.stop();
+    throw err;
   }
 }
 
