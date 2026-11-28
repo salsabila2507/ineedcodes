@@ -21,18 +21,18 @@ const WIN = process.platform === 'win32';
 export const AGENTS = [
   {
     id: 'antigravity', name: 'Antigravity', commands: ['agy'], args: ['acp'],
-    why: 'Google Antigravity CLI, free with a Google account',
+    why: 'Google, free plan',
     install: 'curl -fsSL https://antigravity.google/cli/install.sh | bash   (Windows: irm https://antigravity.google/cli/install.ps1 | iex)',
     login: 'agy acp --login',
     paths: [['.local', 'bin', 'agy'], ['AppData', 'Local', 'agy', 'bin', 'agy.exe']],
     // Google allows agy acp only while a person drives the session: never from serve, telegram or scripts
     personOnly: true
   },
-  { id: 'opencode', name: 'OpenCode', commands: ['opencode'], args: ['acp'], why: 'OpenCode, has free models', install: 'npm install -g opencode-ai', login: 'opencode auth login' },
-  { id: 'goose', name: 'Goose', commands: ['goose'], args: ['acp'], why: 'Goose by Block', install: 'see https://goose-docs.ai', login: 'goose configure' },
-  { id: 'qwen', name: 'Qwen Code', commands: ['qwen'], args: ['--acp'], why: 'Qwen Code CLI', install: 'npm install -g @qwen-code/qwen-code', login: 'qwen' },
-  { id: 'claude', name: 'Claude Code', commands: ['claude-agent-acp', 'claude-code-acp'], args: [], why: 'Claude Code through its ACP adapter, uses your Claude plan', install: 'npm install -g @agentclientprotocol/claude-agent-acp', login: 'claude   (then /login)' },
-  { id: 'codex', name: 'Codex', commands: ['codex-acp'], args: [], why: 'Codex through its ACP adapter, uses your ChatGPT plan', install: 'npm install -g @agentclientprotocol/codex-acp', login: 'codex login' }
+  { id: 'opencode', name: 'OpenCode', commands: ['opencode'], args: ['acp'], why: 'free models', install: 'npm install -g opencode-ai', login: 'opencode auth login' },
+  { id: 'goose', name: 'Goose', commands: ['goose'], args: ['acp'], why: 'Block', install: 'see https://goose-docs.ai', login: 'goose configure' },
+  { id: 'qwen', name: 'Qwen Code', commands: ['qwen'], args: ['--acp'], why: 'Qwen', install: 'npm install -g @qwen-code/qwen-code', login: 'qwen' },
+  { id: 'claude', name: 'Claude Code', commands: ['claude-agent-acp', 'claude-code-acp'], args: [], why: 'Claude plan', install: 'npm install -g @agentclientprotocol/claude-agent-acp', login: 'claude   (then /login)' },
+  { id: 'codex', name: 'Codex', commands: ['codex-acp'], args: [], why: 'ChatGPT plan', install: 'npm install -g @agentclientprotocol/codex-acp', login: 'codex login' }
 ];
 
 export function findAgent(id) {

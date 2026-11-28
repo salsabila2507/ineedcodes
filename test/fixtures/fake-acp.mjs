@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 
 const mode = process.env.FAKE_ACP_MODE ?? '';
+const toolTitle = process.env.FAKE_ACP_TOOL_TITLE || 'Write notes.txt';
 // FAKE_ACP_PID: where to write this process id, so a test can prove it was shut down
 if (process.env.FAKE_ACP_PID) fs.writeFileSync(process.env.FAKE_ACP_PID, String(process.pid));
 const log = m => { if (process.env.FAKE_ACP_LOG) fs.appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(m) + '\n'); };
@@ -56,10 +57,10 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       update(sid, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } });
       update(sid, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ECHO:' } });
       update(sid, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: text } });
-      update(sid, { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'Write notes.txt', kind: 'edit', status: 'pending' });
+      update(sid, { sessionUpdate: 'tool_call', toolCallId: 'call_1', title: toolTitle, kind: 'edit', status: 'pending' });
       const answer = await ask('session/request_permission', {
         sessionId: sid,
-        toolCall: { toolCallId: 'call_1', title: 'Write notes.txt', kind: 'edit' },
+        toolCall: { toolCallId: 'call_1', title: toolTitle, kind: 'edit' },
         options: [
           { optionId: 'ok-once', name: 'Allow once', kind: 'allow_once' },
           { optionId: 'ok-always', name: 'Always allow', kind: 'allow_always' },
@@ -69,7 +70,7 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       const outcome = answer.result?.outcome;
       const picked = outcome?.outcome === 'selected' ? outcome.optionId : 'cancelled';
       const allowed = picked === 'ok-once' || picked === 'ok-always';
-      update(sid, { sessionUpdate: 'tool_call_update', toolCallId: 'call_1', title: 'Write notes.txt', status: allowed ? 'completed' : 'failed' });
+      update(sid, { sessionUpdate: 'tool_call_update', toolCallId: 'call_1', title: toolTitle, status: allowed ? 'completed' : 'failed' });
       update(sid, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' PERM:' + picked } });
       // a client call ineed does not support must get a JSON-RPC error back
       const fsAnswer = await ask('fs/read_text_file', { sessionId: sid, path: '/etc/hostname' });
