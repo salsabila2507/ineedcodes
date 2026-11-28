@@ -1886,6 +1886,17 @@ fs.rmSync(CFG, { recursive: true, force: true });
     (r.stderr || '') + JSON.stringify(saved));
 }
 {
+  const dir = fs.mkdtempSync(path.join(TMP, 'envswitch-'));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ providers: { a: { baseUrl: 'https://a.invalid/v1', apiKey: 'sk-A', model: 'model-a' }, b: { baseUrl: 'https://b.invalid/v1', apiKey: 'sk-B', model: 'model-b' } }, provider: 'a' }), { mode: 0o600 });
+  const url = pathToFileURL(path.join(ROOT, 'src', 'config.js')).href;
+  const code = 'const c = await import(' + JSON.stringify(url) + '); const s = c.loadConfig(); c.setActiveProvider(s, "b");';
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, INEED_CONFIG_DIR: dir, INEED_MODEL: 'model-b' } });
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  check('config: env restore never copies one provider\'s value onto another',
+    r.status === 0 && saved.provider === 'b' && saved.providers.b.model === 'model-b' && saved.providers.a.model === 'model-a',
+    (r.stderr || '') + JSON.stringify(saved));
+}
+{
   const dir = fs.mkdtempSync(path.join(TMP, 'sesscfg-'));
   fs.writeFileSync(path.join(dir, 'evil.json'), JSON.stringify({ id: '../pwn', history: [{ role: 'user', content: 'x' }] }));
   const url = pathToFileURL(path.join(ROOT, 'src', 'sessions.js')).href;

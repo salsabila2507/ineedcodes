@@ -113,11 +113,13 @@ export function normalize(c) {
 }
 
 // env overrides are for this process only: saveConfig writes the file value
-// back for every field that still holds the value the environment supplied
+// back for every field that still holds the value the environment supplied.
+// Provider fields restore only onto the provider they were read from
 const envOverrides = {};
+const PROVIDER_FIELDS = new Set(['baseUrl', 'apiKey', 'model']);
 
 function applyEnv(cfg, field, value) {
-  envOverrides[field] = { env: value, file: cfg[field] };
+  envOverrides[field] = { env: value, file: cfg[field], provider: cfg.provider };
   cfg[field] = value;
 }
 
@@ -141,7 +143,8 @@ export function saveConfig(c) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   const clean = normalize(c);
   const onDisk = { ...c };
-  for (const [field, { env, file }] of Object.entries(envOverrides)) {
+  for (const [field, { env, file, provider }] of Object.entries(envOverrides)) {
+    if (PROVIDER_FIELDS.has(field) && onDisk.provider !== provider) continue;
     if (onDisk[field] === env) onDisk[field] = file;
   }
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalize(onDisk), null, 2) + '\n', { mode: 0o600 });
