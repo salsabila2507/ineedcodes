@@ -1123,6 +1123,30 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   server.close();
 }
 
+// ── beginner menus: one list for everything, settings in plain words ──
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:' + port + '/v1', apiKey: SECRET, model: 'mock-mini' }), { mode: 0o600 });
+  const menu = await run([], { input: 'menu\n5\n/exit\n' });
+  check('session: "menu" lists what you can do and runs the pick',
+    menu.code === 0 && menu.out.includes('What do you want to do?') && menu.out.includes('Change settings') && menu.out.includes('Current status'), menu.out.slice(-600));
+  const settings = await run([], { input: 'pengaturan\n7\n2\n/exit\n' });
+  const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
+  check('session: "pengaturan" opens settings; natural wording turns off and is saved',
+    settings.code === 0 && settings.out.includes('Natural wording') && settings.out.includes('natural wording: off') && saved.humanize === false, settings.out.slice(-600));
+  await run([], { input: '/config\n2\n2\n/exit\n' });
+  check('session: numbered /config keeps its old meaning (2 then 2 = commands ask first)',
+    JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8')).permShell === 'ask');
+  await run([], { input: '/config\n2\n1\n/exit\n' });
+  check('session: numbered /config 2 then 1 = commands always allowed',
+    JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8')).permShell === 'allow');
+  const help = await run([], { input: '/help\n/exit\n' });
+  check('session: /help explains plain-language use and groups commands',
+    help.code === 0 && help.out.includes('Just type what you want') && help.out.includes('getting started') && help.out.includes('/menu'), help.out.slice(-600));
+  server.close();
+}
+
 // ── plain words as commands: no slash needed ──
 {
   const { server, port } = await mock('default');

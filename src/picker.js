@@ -52,7 +52,7 @@ export function takeKeys(onKey, input = process.stdin) {
 // Resolves { value } on Enter, { manual: true, typed } on Esc, { cancelled: true }
 // on Ctrl+C. Enter with a filter that matches nothing returns the typed text
 // as the value, so an id missing from the list can still be used.
-export function pickInteractive(items, { title = 'Pick one', initial = 0, rows = 10, input = process.stdin, output = process.stdout } = {}) {
+export function pickInteractive(items, { title = 'Pick one', initial = 0, rows = 10, hint = 'Up/Down move · Enter pick · type to filter · Esc type an id · Ctrl+C cancel', input = process.stdin, output = process.stdout } = {}) {
   return new Promise(resolve => {
     const color = !(process.env.NO_COLOR && process.env.NO_COLOR !== '0');
     let filter = '';
@@ -74,7 +74,7 @@ export function pickInteractive(items, { title = 'Pick one', initial = 0, rows =
         const row = fit(((start + i) === sel ? '  > ' : '    ') + it);
         lines.push((start + i) === sel && color ? '\x1b[7m' + row + '\x1b[0m' : row);
       }
-      lines.push(fit('  Up/Down move · Enter pick · type to filter · Esc type an id · Ctrl+C cancel'));
+      lines.push(fit('  ' + hint));
       let out = drawn ? `\r\x1b[${height}A` : '';
       for (const l of lines) out += '\r\x1b[2K' + l + '\n';
       output.write(out);
