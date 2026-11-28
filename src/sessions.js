@@ -9,6 +9,8 @@ import { CONFIG_DIR as configDirPath } from './config.js';
 const DIR = path.join(configDirPath, 'sessions');
 
 const pad = n => String(n).padStart(2, '0');
+const VALID_ID = /^\d{4}-\d{4}(-\d{1,2})?$/;
+const validId = id => VALID_ID.test(String(id ?? ''));
 
 export function newSessionId(d = new Date()) {
   return `${pad(d.getHours())}${pad(d.getMinutes())}-${pad(d.getDate())}${pad(d.getMonth() + 1)}`;
@@ -16,8 +18,9 @@ export function newSessionId(d = new Date()) {
 
 export function saveSession(data) {
   fs.mkdirSync(DIR, { recursive: true });
-  let id = data.id || newSessionId();
-  if (!data.id) {
+  const known = validId(data.id);
+  let id = known ? data.id : newSessionId();
+  if (!known) {
     // two sessions started in the same minute must not overwrite each other:
     // the later one gets a -2, -3, ... suffix
     const base = id;
@@ -32,7 +35,7 @@ export function saveSession(data) {
 // /clear used to empty the chat while the saved file kept every turn, which
 // looks like the data was forgotten but is still on disk
 export function deleteSession(id) {
-  if (!id) return false;
+  if (!validId(id)) return false;
   try {
     fs.unlinkSync(path.join(DIR, id + '.json'));
     return true;
@@ -42,8 +45,8 @@ export function deleteSession(id) {
 export function listSessions() {
   try {
     return fs.readdirSync(DIR)
-      .filter(f => f.endsWith('.json'))
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')); } catch { return null; } })
+      .filter(f => f.endsWith('.json') && validId(f.slice(0, -5)))
+      .map(f => { try { return { ...JSON.parse(fs.readFileSync(path.join(DIR, f), 'utf8')), id: f.slice(0, -5) }; } catch { return null; } })
       .filter(Boolean).filter(s => (s.history?.length ?? 0) > 0)
       .sort((a, b) => b.time - a.time)
       .slice(0, 20);
@@ -51,6 +54,6 @@ export function listSessions() {
 }
 
 export function loadSession(id) {
-  if (!id) return null;
-  try { return JSON.parse(fs.readFileSync(path.join(DIR, id + '.json'), 'utf8')); } catch { return null; }
+  if (!validId(id)) return null;
+  try { return { ...JSON.parse(fs.readFileSync(path.join(DIR, id + '.json'), 'utf8')), id }; } catch { return null; }
 }

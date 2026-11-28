@@ -112,17 +112,29 @@ export function normalize(c) {
   };
 }
 
+// env overrides are for this process only: saveConfig writes the file value
+// back for every field that still holds the value the environment supplied.
+// Provider fields restore only onto the provider they were read from
+const envOverrides = {};
+const PROVIDER_FIELDS = new Set(['baseUrl', 'apiKey', 'model']);
+
+function applyEnv(cfg, field, value) {
+  envOverrides[field] = { env: value, file: cfg[field], provider: cfg.provider };
+  cfg[field] = value;
+}
+
 export function loadConfig() {
   let raw = null;
   try { raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch {}
   const cfg = normalize(raw ?? {});
+  for (const field of Object.keys(envOverrides)) delete envOverrides[field];
   // env overrides win over the file: switch provider or run headless with no
   // config at all (INEED_BASE_URL / INEED_API_KEY / INEED_MODEL)
-  if (process.env.INEED_BASE_URL) cfg.baseUrl = cleanUrl(process.env.INEED_BASE_URL);
-  if (process.env.INEED_API_KEY) cfg.apiKey = String(process.env.INEED_API_KEY);
-  if (process.env.INEED_MODEL) cfg.model = String(process.env.INEED_MODEL);
-  if (process.env.INEED_MAX_STEPS != null) cfg.maxSteps = clampSteps(process.env.INEED_MAX_STEPS);
-  if (process.env.INEED_TOKEN_BUDGET) cfg.tokenBudget = Math.max(0, Math.floor(Number(process.env.INEED_TOKEN_BUDGET) || 0));
+  if (process.env.INEED_BASE_URL) applyEnv(cfg, 'baseUrl', cleanUrl(process.env.INEED_BASE_URL));
+  if (process.env.INEED_API_KEY) applyEnv(cfg, 'apiKey', String(process.env.INEED_API_KEY));
+  if (process.env.INEED_MODEL) applyEnv(cfg, 'model', String(process.env.INEED_MODEL));
+  if (process.env.INEED_MAX_STEPS != null) applyEnv(cfg, 'maxSteps', clampSteps(process.env.INEED_MAX_STEPS));
+  if (process.env.INEED_TOKEN_BUDGET) applyEnv(cfg, 'tokenBudget', Math.max(0, Math.floor(Number(process.env.INEED_TOKEN_BUDGET) || 0)));
   if (!cfg.baseUrl || !cfg.model) return null;
   return cfg;
 }
@@ -130,7 +142,12 @@ export function loadConfig() {
 export function saveConfig(c) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   const clean = normalize(c);
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
+  const onDisk = { ...c };
+  for (const [field, { env, file, provider }] of Object.entries(envOverrides)) {
+    if (PROVIDER_FIELDS.has(field) && onDisk.provider !== provider) continue;
+    if (onDisk[field] === env) onDisk[field] = file;
+  }
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalize(onDisk), null, 2) + '\n', { mode: 0o600 });
   try { fs.chmodSync(CONFIG_FILE, 0o600); } catch {}
   if (process.platform === 'win32') {
     // NTFS has no POSIX mode bits, so 0600 is a no-op there. Match the Linux

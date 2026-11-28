@@ -55,6 +55,7 @@ class McpServer {
         }
       });
       child.stderr.on('data', () => {}); // servers log freely; never leaks into the model
+      child.stdin.on('error', () => { this.dead = true; });
       child.on('error', err => {
         this.dead = true;
         if (!settled) { settled = true; reject(new Error(`MCP server ${this.name}: ${err.message}`)); }
@@ -65,7 +66,7 @@ class McpServer {
         this.pending.clear();
       });
       const fail = setTimeout(() => {
-        if (!settled) { settled = true; reject(new Error(`MCP server ${this.name} did not answer initialize (10s)`)); }
+        if (!settled) { settled = true; this.kill(); reject(new Error(`MCP server ${this.name} did not answer initialize (10s)`)); }
       }, 10_000);
       this.request('initialize', {
         protocolVersion: '2024-11-05',

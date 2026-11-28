@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import { chat } from './provider.js';
 import { safeProjectPath } from './tools.js';
 
-const PROSE_EXT = new Set(['.html', '.htm', '.md', '.markdown', '.txt']);
+const PROSE_EXT = new Set(['.html', '.htm', '.md', '.markdown']);
 const CODE_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.yaml', '.yml', '.css', '.scss', '.py', '.rb', '.go', '.rs', '.java', '.php', '.sh', '.sql', '.toml', '.xml', '.svg']);
 
 export function isHumanizableFile(absPath) {
@@ -44,10 +44,40 @@ const RULES = [
 function applyRules(text) {
   let out = text;
   for (const [re, to] of RULES) out = out.replace(re, to);
-  out = out.replace(/[ \t]{2,}/g, ' ');
+  out = out.replace(/(\S)[ \t]{2,}/g, '$1 ');
   out = out.replace(/ +([.,!?])/g, '$1');
   out = out.replace(/ \n/g, '\n');
   return out;
+}
+
+// Markdown: fenced blocks, indented blocks and inline code spans stay byte for
+// byte; the rules only see the prose between them.
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+
+function rulesOutsideCode(text) {
+  const out = [];
+  let prose = [], fence = null, hasCode = false;
+  const flush = () => {
+    if (!prose.length) return;
+    const parts = prose.join('\n').split(/(`+[^`\n]*`+)/);
+    if (parts.length > 1) hasCode = true;
+    out.push(parts.map((part, i) => i % 2 ? part : applyRules(part)).join(''));
+    prose = [];
+  };
+  for (const line of text.split('\n')) {
+    const open = FENCE.exec(line);
+    if (fence) {
+      out.push(line);
+      if (open && open[1][0] === fence[0] && open[1].length >= fence.length && !line.slice(open[0].length).trim()) fence = null;
+    } else if (open || /^(?: {4}|\t)/.test(line)) {
+      flush();
+      hasCode = true;
+      if (open) fence = open[1];
+      out.push(line);
+    } else prose.push(line);
+  }
+  flush();
+  return { text: out.join('\n'), hasCode };
 }
 
 // Only rewrite unambiguous prose spans in well-nested, ordinary HTML. Keep
@@ -134,11 +164,12 @@ export async function humanizeFile(cfg, absPath, signal, hooks = {}) {
   const spans = isHtml ? copySpans(src) : [];
   if (isHtml && !spans.length) return { changed: false, reason: 'no eligible HTML copy' };
   const lines = spans.map(s => applyRules(s.text));
-  let next = isHtml ? renderCopy(src, spans, lines) : applyRules(src);
+  const md = isHtml ? null : rulesOutsideCode(src);
+  let next = isHtml ? renderCopy(src, spans, lines) : md.text;
 
   // step 2: model pass (skipped in plan mode or when no hooks provide a provider)
   const before = next;
-  if (cfg?.apiKey && !hooks.skipModel) {
+  if (cfg?.apiKey && !hooks.skipModel && !md?.hasCode) {
     try {
       if (isHtml) {
         const rewritten = await humanizeWithModel(cfg, lines.join('\n'), kind, signal);
@@ -151,7 +182,7 @@ export async function humanizeFile(cfg, absPath, signal, hooks = {}) {
         else hooks.onNote?.('humanizer model pass skipped: reply looked wrong');
       }
       // final sanitization: the model pass may reintroduce cliches or em dashes
-      if (!isHtml) next = applyRules(next);
+      if (!isHtml) next = rulesOutsideCode(next).text;
     } catch (err) {
       hooks.onNote?.(`humanizer model pass skipped: ${err.message}`);
     }
