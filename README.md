@@ -126,6 +126,7 @@ ineed acp antigravity                      # a chat that stays in one session
 | --- | --- | --- |
 | `antigravity` (Google, free with a Google account) | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` (Windows: `irm https://antigravity.google/cli/install.ps1 \| iex`) | `agy acp --login`, or pick the sign-in ineed offers |
 | `opencode` (has free models) | `npm install -g opencode-ai` | none for free models; `opencode auth login` for others |
+| `mistral` (Mistral Vibe, free tier) | `uv tool install mistral-vibe` | sign in through Mistral AI Studio when ineed asks |
 | `claude` (your Claude plan) | `npm install -g @agentclientprotocol/claude-agent-acp` | `claude`, then `/login` |
 | `codex` (your ChatGPT plan) | `npm install -g @agentclientprotocol/codex-acp` | `codex login` |
 | `qwen` | `npm install -g @qwen-code/qwen-code` | `qwen` |

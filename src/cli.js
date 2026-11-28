@@ -180,7 +180,7 @@ if (args[0] === 'acp') {
   if (!agentArg || agentArg === 'list') {
     console.log(bold('Agents ineed can drive') + dim('  no API key, the agent keeps its own sign-in'));
     for (const a of list) {
-      console.log('  ' + (a.found ? green('✓') : dim('·')) + ' ' + bold(a.short.padEnd(4))
+      console.log('  ' + (a.found ? green('✓') : dim('·')) + ' ' + bold(a.short.padEnd(5))
         + dim(a.id.padEnd(12)) + dim(a.found ? a.why : 'not installed'));
     }
     const first = list.find(a => a.found)?.short ?? 'oc';

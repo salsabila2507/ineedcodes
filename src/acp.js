@@ -29,6 +29,7 @@ export const AGENTS = [
     personOnly: true
   },
   { id: 'opencode', name: 'OpenCode', short: 'oc', commands: ['opencode'], args: ['acp'], why: 'free models', install: 'npm install -g opencode-ai', login: 'opencode auth login' },
+  { id: 'mistral', name: 'Mistral Vibe', short: 'vibe', commands: ['vibe-acp'], args: [], why: 'Mistral free tier', install: 'uv tool install mistral-vibe   (Windows: winget install MistralAI.MistralVibe.ACP)', login: 'vibe   (or sign in through Mistral AI Studio when ineed asks)' },
   { id: 'goose', name: 'Goose', short: 'gs', commands: ['goose'], args: ['acp'], why: 'Block', install: 'see https://goose-docs.ai', login: 'goose configure' },
   { id: 'qwen', name: 'Qwen Code', short: 'qw', commands: ['qwen'], args: ['--acp'], why: 'Qwen', install: 'npm install -g @qwen-code/qwen-code', login: 'qwen' },
   { id: 'claude', name: 'Claude Code', short: 'cc', commands: ['claude-agent-acp', 'claude-code-acp'], args: [], why: 'Claude plan', install: 'npm install -g @agentclientprotocol/claude-agent-acp', login: 'claude   (then /login)' },
