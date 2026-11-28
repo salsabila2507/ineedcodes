@@ -96,6 +96,11 @@ export function normalize(c) {
     stream: c.stream === true,
     searchUrl: c.searchUrl ? String(c.searchUrl) : '',
     modelSuffix: String(c.modelSuffix ?? '').trim(),
+    // remote control: ineed serve / ineed telegram
+    servePort: Math.min(65535, Math.max(1, Math.floor(Number(c.servePort)) || 7777)),
+    serveToken: String(c.serveToken ?? ''),
+    telegramToken: String(c.telegramToken ?? ''),
+    telegramChats: String(c.telegramChats ?? '').trim(),
     explain: ['short', 'deep'].includes(c.explain) ? c.explain : 'normal',
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
     permShell: c.permShell === 'allow' ? 'allow' : 'ask',

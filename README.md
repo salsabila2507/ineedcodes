@@ -112,6 +112,21 @@ ineed › explain this repository like I am a beginner
 
 The agent decides what it needs: list files, read code, search, edit, run shell commands, verify the result, and report back with evidence.
 
+## From Telegram or an app
+
+The same agent, reachable when the terminal is closed. Both doors feed one task queue, so two tasks never edit the same folder at once.
+
+```bash
+ineed telegram --token <bot-token>     # chat with it from Telegram
+ineed serve --token <secret>          # a local HTTP API for an app
+```
+
+**Telegram.** Create a bot with @BotFather, then send it a message. Every chat is refused until you allow it: the bot replies with the chat id it saw, and you add it with `--chats 1234567` (or `telegramChats` in the config). `/status` shows what it is doing; anything else is a task.
+
+**HTTP.** `POST /task` with `{"text": "..."}` accepts work and answers `202` at once, `GET /events` streams what happens (server-sent events: `started`, `tool`, `note`, `done`, `error`), and `GET /health` returns whether it is busy, for how many, and in which folder. It listens on `127.0.0.1` only, and `--token` requires `Authorization: Bearer <token>` on every call except `/health`.
+
+Both run in the folder you start them in, with the saved provider, model and permissions. There is nobody to approve a command in a chat, so `permEdit` and `permShell` decide: `ask` behaves like "nobody to ask" and lets the task run. Keep remote control to chats and networks you trust.
+
 ## Session shortcuts
 
 | command | what it does |
