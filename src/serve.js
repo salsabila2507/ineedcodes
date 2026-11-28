@@ -12,6 +12,7 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
   let queued = 0;
   let tail = Promise.resolve();
   let current = null;
+  let stopping = false;
   const listeners = new Set();
   const emit = event => {
     onEvent(event);
@@ -21,9 +22,12 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
 
   const submit = text => {
     const task = String(text ?? '').trim();
+    if (stopping) return Promise.resolve({ answer: 'Stopped before it started.', changed: [] });
     const run = tail.then(async () => {
       queued--;
       if (!task) return { answer: '' };
+      // a shutdown drops whatever was queued: starting it would be half a task
+      if (stopping) return { answer: 'Stopped before it started.', changed: [] };
       busy = true;
       emit({ type: 'started', text: task });
       try {
@@ -55,6 +59,7 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
   // Ctrl+C during a remote task must stop the work, not just this process: a
   // shell command runs in its own process group and would keep going otherwise
   const stop = async (waitMs = 10_000) => {
+    stopping = true;
     try { current?.abort?.(); } catch {}
     await Promise.race([tail.catch(() => {}), new Promise(r => setTimeout(r, waitMs))]);
   };
@@ -75,7 +80,9 @@ export function startHttp(host, { port = 7777, token = '', hostname = '127.0.0.1
   // A tokenless server still must not take work from a web page someone has
   // open: a browser sends Origin (and a non-JSON content type sails through a
   // CORS preflight), so both are refused. curl, apps and scripts send neither.
-  const fromBrowser = req => Boolean(req.headers.origin) || !/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''));
+  const hasBody = req => req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
+  const fromBrowser = req => Boolean(req.headers.origin)
+    || (hasBody(req) && !/^application\/json\b/i.test(String(req.headers['content-type'] ?? '')));
 
   const allowed = req => {
     if (!token) return !fromBrowser(req);
@@ -90,10 +97,10 @@ export function startHttp(host, { port = 7777, token = '', hostname = '127.0.0.1
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (!hostAllowed(req)) return json(res, 421, { ok: false, error: 'wrong host' });
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { ok: true, version: 1, ...host.status() });
     }
-    if (!hostAllowed(req)) return json(res, 421, { ok: false, error: 'wrong host' });
     if (!allowed(req)) return json(res, 401, { ok: false, error: token ? 'missing or wrong token' : 'this call did not come from a local app: send JSON without a browser Origin, or start the server with --token' });
 
     if (req.method === 'GET' && url.pathname === '/events') {

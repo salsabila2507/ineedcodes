@@ -1223,6 +1223,14 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const localApp = await fetch(openBase + '/task', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"say hi"}' });
   check('serve: a tokenless server takes plain local JSON but refuses a page-forged POST',
     forged.status === 401 && localApp.status === 202, forged.status + '/' + localApp.status);
+  const noTokenEvents = await fetch(openBase + '/events', { signal: AbortSignal.timeout(2000) }).then(r => r.status).catch(() => 0);
+  check('serve: a tokenless event stream still opens for a local client', noTokenEvents === 200, String(noTokenEvents));
+  const rebind = await new Promise(done => {
+    const r = http.request({ host: '127.0.0.1', port: open.port, path: '/health', headers: { host: 'evil.example' } }, res => { res.resume(); done(res.statusCode); });
+    r.on('error', () => done(0));
+    r.end();
+  });
+  check('serve: /health refuses a foreign Host header too', rebind === 421, String(rebind));
   await open.close();
   const sse = await fetch(base + '/events', { headers: { authorization: 'Bearer t0k' } });
   const reader = sse.body.getReader();
@@ -1293,6 +1301,13 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   quietBot.close();
   check('telegram: an empty allowlist refuses every chat, including its own id',
     seen.length > 0 && seen.every(s => /not allowed/.test(s)) && fs.readdirSync(idle).length === 0, seen.join(' ').slice(0, 300));
+
+  // shutdown: an abort stops the run, and queued work never starts
+  const started = events.length;
+  await host.stop(1000);
+  const afterStop = await host.submit('say hi again');
+  check('serve: shutdown drops the queue instead of starting another task',
+    /Stopped before it started/.test(afterStop.answer) && events.length === started, afterStop.answer + ' ' + events.length);
   mockServer.close();
 }
 
