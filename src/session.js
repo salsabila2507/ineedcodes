@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { clearConfig, normalize, saveConfig, addProvider, removeProvider, providerNames } from './config.js';
 import { switchProviderLive, isUnreachable, usesBuiltinGateway, recoveryPrompt } from './switch.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
-import { fetchModels } from './provider.js';
+import { fetchModels, filterModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
 import { wizard } from './wizard.js';
 import { canPickInteractive, pickInteractive } from './picker.js';
@@ -513,16 +513,18 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (isUnreachable(err.message)) say(T.muted('   this provider cannot be reached. Switch or add one: ') + T.text('/provider') + T.muted(' · ') + T.text('/provider add'));
       return;
     } finally { if (activeOp === op) activeOp = null; }
-    if (models.length === 0 && state.modelSuffix) {
-      say(yellow(`   No model name ends with "${state.modelSuffix}".`) + T.muted(' Change or clear the filter: /config models <ending>, or /config models off'));
-      return;
-    }
     if (models.length === 0) {
       say(yellow('   Server sent no list. Change model by editing ~/.ineedcodes/config.json'));
       return;
     }
-    // full list: the picker scrolls, so nothing is hidden beyond a fixed slice
-    const list = models;
+    // the server's full catalog stays the truth (a saved model is valid even when
+    // the filter hides it); the filter only decides what is shown here. The
+    // picker scrolls, so nothing is hidden beyond a fixed slice
+    const list = filterModels(models, state.modelSuffix);
+    if (list.length === 0) {
+      say(yellow(`   No model name ends with "${state.modelSuffix}".`) + T.muted(' Change or clear the filter: /config models <ending>, or /config models off'));
+      return;
+    }
     // last working model first, so a 403 "deposit required" recovery is one enter away
     const ordered = state.lastGood && list.includes(state.lastGood)
       ? [state.lastGood, ...list.filter(m => m !== state.lastGood)]

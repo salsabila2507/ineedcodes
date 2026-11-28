@@ -132,11 +132,11 @@ export async function fetchModels(cfg, signal) {
   const alias = String(cfg.modelAlias ?? '').trim();
   if (!alias) {
     aliasCache.delete(cfg.baseUrl);
-    return filterModels(ids, cfg.modelSuffix);
+    return ids;
   }
   const { list, map } = buildModelAlias(ids, alias);
   aliasCache.set(cfg.baseUrl, map);
-  return filterModels(list, cfg.modelSuffix);
+  return list;
 }
 
 // "modelSuffix": show only models whose id ends with one of these

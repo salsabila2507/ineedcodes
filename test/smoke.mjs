@@ -1171,6 +1171,34 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   server.close();
 }
 
+// ── model filter: display only, and the setup wizard honors it ──
+{
+  const { normalize } = await import('../src/config.js');
+  const { switchProviderLive } = await import('../src/switch.js');
+  const { server, port } = await mock('default');
+  const baseUrl = 'http://127.0.0.1:' + port + '/v1';
+  const cfg = normalize({
+    providers: { p: { baseUrl, apiKey: SECRET, model: 'mock-pro' } }, provider: 'p',
+    baseUrl, apiKey: SECRET, model: 'mock-pro', modelSuffix: 'mini'
+  });
+  const r = await switchProviderLive(cfg, 'p', { save: false });
+  check('models: a filter never replaces a saved model that the catalog still has',
+    r.ok && r.model === 'mock-pro' && !r.modelChanged && r.cfg.providers.p.model === 'mock-pro', JSON.stringify([r.model, r.modelChanged]));
+  const gone = await switchProviderLive(normalize({ ...cfg, providers: { p: { baseUrl, apiKey: SECRET, model: 'vanished' } }, model: 'vanished' }), 'p', { save: false });
+  check('models: a saved model missing from the catalog is still replaced by a listed one',
+    gone.ok && Boolean(gone.model) && gone.model !== 'vanished' && gone.modelChanged, JSON.stringify([gone.model, gone.modelChanged]));
+  server.close();
+}
+{
+  const { server, port } = await mock('default');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:' + port + '/v1', apiKey: SECRET, model: 'mock-mini', modelSuffix: 'mini' }), { mode: 0o600 });
+  const w = await run([], { input: '/provider add extra\nhttp://127.0.0.1:' + port + '/v1\n' + SECRET + '\n\n/exit\n' });
+  check('models: the setup wizard shows only matching models and says why',
+    w.code === 0 && w.out.includes('names ending with mini'), w.out.slice(-700));
+  server.close();
+}
+
 // ── plain words as commands: no slash needed ──
 {
   const { server, port } = await mock('default');
