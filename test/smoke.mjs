@@ -2362,6 +2362,16 @@ if (process.platform !== 'win32') {
     check('cli acp: Antigravity refuses to run without a person at a terminal', code === 1 && out.includes('only runs when you type') && !out.includes('ECHO:'), out);
   }
   {
+    fs.rmSync(logFile, { force: true });
+    const { code, out } = await run(['acp', 'opencode', '--model', 'fake-2', 'do', 'it'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
+    const sent = fs.readFileSync(logFile, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    const set = sent.find(m => m.method === 'session/set_config_option');
+    const prompt = sent.find(m => m.method === 'session/prompt');
+    check('cli acp: --model switches the agent model and never leaks into the task',
+      code === 0 && set?.params?.configId === 'model' && set.params.value === 'fake-2'
+        && prompt?.params?.prompt?.[0]?.text === 'do it', JSON.stringify({ set, prompt }));
+  }
+  {
     const { code, out } = await run(['acp', 'opencode'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
     check('cli acp: chat without a terminal asks for a task instead of hanging', code === 1 && out.includes('ineed acp opencode'), out);
   }

@@ -14,6 +14,8 @@ const log = m => { if (process.env.FAKE_ACP_LOG) fs.appendFileSync(process.env.F
 const send = m => process.stdout.write(JSON.stringify(m) + '\n');
 let authed = mode !== 'auth' && mode !== 'noauth';
 let nextId = 1000;
+let model = 'fake-1';
+const models = () => [{ value: 'fake-1', name: 'Fake One' }, { value: 'fake-2', name: 'Fake Two' }];
 const waiting = new Map();
 const ask = (method, params) => new Promise(resolve => { const id = nextId++; waiting.set(id, resolve); send({ jsonrpc: '2.0', id, method, params }); });
 const update = (sessionId, u) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: u } });
@@ -42,7 +44,14 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       return reply({});
     case 'session/new':
       if (!authed) return fail(-32000, 'Authentication required');
-      return reply({ sessionId: 'sess_fake_1' });
+      return reply({
+        sessionId: 'sess_fake_1',
+        models: { currentModelId: model, availableModels: models() },
+        configOptions: [{
+          id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model,
+          options: models()
+        }]
+      });
     case 'session/prompt': {
       const sid = msg.params.sessionId;
       if (mode === 'double') {
@@ -77,6 +86,9 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       update(sid, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' FS:' + (fsAnswer.error?.code ?? 'ok') } });
       return reply({ stopReason: 'end_turn' });
     }
+    case 'session/set_config_option':
+      model = msg.params.value;
+      return reply({ configOptions: [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model, options: models() }] });
     case 'session/cancel':
       return;
     default:

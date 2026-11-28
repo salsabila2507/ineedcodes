@@ -263,7 +263,17 @@ if (args[0] === 'acp') {
     const reply = (await ask(dim('  Pick a number to sign in, or Enter to stop:'))).trim();
     return methods[Number(reply) - 1] ?? null;
   };
-  const oneShot = args.slice(2).join(' ').trim();
+  // --model and --mode pick from what the agent offers; everything else is the task
+  const words = [];
+  let modelArg = null;
+  let modeArg = null;
+  for (let i = 2; i < args.length; i++) {
+    const word = args[i];
+    if (word === '-m' || word === '--model') { modelArg = args[++i] ?? ''; continue; }
+    if (word === '--mode') { modeArg = args[++i] ?? ''; continue; }
+    words.push(word);
+  }
+  const oneShot = words.join(' ').trim();
   let session = null;
   let busy = false;
   const cancelTurn = () => {
@@ -276,6 +286,42 @@ if (args[0] === 'acp') {
   const aroundLogin = async login => {
     rl?.close();
     try { return await login(); } finally { if (interactive) openInput(); }
+  };
+  // the agent decides what can change; ineed only shows and sets what it offers
+  const optionOf = category => (session?.agent.configOptions ?? []).find(o => o.category === category || o.id === category);
+  const optionName = value => {
+    for (const o of session.agent.configOptions ?? []) {
+      const hit = (o.options ?? []).find(x => x.value === value);
+      if (hit) return hit.name ?? hit.value;
+    }
+    return value;
+  };
+  const showOption = option => {
+    if (!option) { console.log(dim('  this agent does not offer ' + (option === undefined ? 'that' : 'it'))); return; }
+    console.log(dim('  ' + option.name.toLowerCase() + ':'));
+    (option.options ?? []).forEach((o, i) => {
+      const current = o.value === option.currentValue;
+      console.log('  ' + (current ? green('●') : dim('○')) + ' ' + bold(String(i + 1).padStart(2)) + '. ' + (current ? bold(o.name ?? o.value) : (o.name ?? o.value)));
+    });
+  };
+  // a number, an exact value or name, or a unique part of one
+  const chooseOption = async (option, want) => {
+    if (!option) return console.log(yellow('  this agent does not offer that'));
+    if (!want) return showOption(option);
+    const lower = want.toLowerCase();
+    const list = option.options ?? [];
+    const hit = list[Number(want) - 1] && String(Number(want)) === want
+      ? list[Number(want) - 1]
+      : list.find(o => o.value === want)
+        ?? list.find(o => String(o.name ?? '').toLowerCase() === lower)
+        ?? list.filter(o => String(o.name ?? '').toLowerCase().includes(lower) || o.value.toLowerCase().includes(lower))[0];
+    if (!hit) return console.log(yellow('  no ' + option.name.toLowerCase() + ' called ' + want) + dim('  try /' + option.category));
+    try {
+      await session.agent.setConfig(option.id, hit.value);
+      console.log(dim('  ' + option.name.toLowerCase() + ': ') + bold(hit.name ?? hit.value));
+    } catch (err) {
+      console.log(red('  could not change it: ' + String(err?.message ?? err)));
+    }
   };
   const send = async text => {
     printed = '';
@@ -291,17 +337,26 @@ if (args[0] === 'acp') {
   };
   try {
     session = await connect({ command: here.command, args: agent.args, cwd: acpCwd, onUpdate, onPermission, chooseAuth, aroundLogin, terminalAuth: interactive && process.platform !== 'win32' });
+    if (modelArg) await chooseOption(optionOf('model'), modelArg);
+    if (modeArg) await chooseOption(optionOf('mode'), modeArg);
     if (oneShot) {
       await send(oneShot);
     } else if (!ask) {
       console.error(red('  Give a task: ') + 'ineed acp ' + agent.id + ' "<task>"' + dim('  (chat needs a terminal)'));
       process.exitCode = 1;
     } else {
+      console.log(dim('  /model  /mode  /exit'));
       for (;;) {
         let text;
         try { text = (await ask(dim(agent.short + ' ›'), { onEof: '/exit' })).trim(); } catch { text = '/exit'; }
         if (!text) continue;
+        const [command, ...rest] = text.split(/\s+/);
         if (['/exit', '/quit', 'exit', 'quit', 'keluar'].includes(text.toLowerCase())) break;
+        if (command === '/model' || command === '/mode' || command === '/thinking') {
+          const category = command === '/model' ? 'model' : command === '/mode' ? 'mode' : 'thought_level';
+          await chooseOption(optionOf(category), rest.join(' ').trim());
+          continue;
+        }
         await send(text);
       }
     }

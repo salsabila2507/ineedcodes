@@ -62,6 +62,7 @@ export function startAgent({ command, args = [], cwd, env = process.env, onUpdat
   const pending = new Map();
   let nextId = 1;
   let sessionId = null;
+  let configOptions = [];
   let stderr = '';
   let dead = null;
   let cancelled = false;
@@ -158,8 +159,18 @@ export function startAgent({ command, args = [], cwd, env = process.env, onUpdat
       const r = await request('session/new', { cwd: dir, mcpServers: [] });
       sessionId = r?.sessionId ?? null;
       if (!sessionId) throw new Error('the agent did not return a session');
+      // what the agent lets the session change: model, thinking level, mode
+      configOptions = Array.isArray(r?.configOptions) ? r.configOptions : [];
       return sessionId;
     },
+    // session/set_config_option answers with the whole option list, kept here so
+    // the next /model shows the state the agent actually holds
+    async setConfig(configId, value) {
+      const r = await request('session/set_config_option', { sessionId, configId, value });
+      if (Array.isArray(r?.configOptions)) configOptions = r.configOptions;
+      return configOptions;
+    },
+    get configOptions() { return configOptions; },
     prompt: async (text, sid = sessionId) => {
       cancelled = false;
       return request('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text: String(text) }] });
