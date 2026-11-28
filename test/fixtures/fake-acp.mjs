@@ -7,6 +7,8 @@ import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 
 const mode = process.env.FAKE_ACP_MODE ?? '';
+// FAKE_ACP_PID: where to write this process id, so a test can prove it was shut down
+if (process.env.FAKE_ACP_PID) fs.writeFileSync(process.env.FAKE_ACP_PID, String(process.pid));
 const log = m => { if (process.env.FAKE_ACP_LOG) fs.appendFileSync(process.env.FAKE_ACP_LOG, JSON.stringify(m) + '\n'); };
 const send = m => process.stdout.write(JSON.stringify(m) + '\n');
 let authed = mode !== 'auth' && mode !== 'noauth';

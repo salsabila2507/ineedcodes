@@ -2300,10 +2300,20 @@ fs.rmSync(CFG, { recursive: true, force: true });
   check('acp: no way to sign in gives auth_required with the methods named',
     authErr?.code === acp.AUTH_REQUIRED && authErr.message.includes('sign in') && authErr.message.includes('Fake login'), String(authErr?.message));
 
-  // a newer protocol version is refused instead of misread
+  // a failed handshake must leave no agent process behind
   let verErr = null;
-  try { await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env('v2') }); } catch (e) { verErr = e; }
+  try { await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: { ...env('v2'), FAKE_ACP_PID: path.join(TMP, 'acp-child.pid') } }); } catch (e) { verErr = e; }
   check('acp: an agent on another protocol version is refused clearly', /version 2/.test(String(verErr?.message)), String(verErr?.message));
+  const pidFile = path.join(TMP, 'acp-child.pid');
+  const gone = await (async () => {
+    for (let i = 0; i < 50; i++) {
+      const pid = Number(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : 0);
+      if (pid) { try { process.kill(pid, 0); } catch { return true; } }
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
+  })();
+  check('acp: the agent process is shut down after a refused handshake', gone, 'child still alive');
 
   // a command that does not exist fails fast with a readable error
   let spawnErr = null;
