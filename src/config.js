@@ -95,6 +95,7 @@ export function normalize(c) {
     humanize: c.humanize !== false,
     stream: c.stream === true,
     searchUrl: c.searchUrl ? String(c.searchUrl) : '',
+    modelSuffix: String(c.modelSuffix ?? '').trim(),
     explain: ['short', 'deep'].includes(c.explain) ? c.explain : 'normal',
     permEdit: c.permEdit === 'allow' ? 'allow' : 'ask',
     permShell: c.permShell === 'allow' ? 'allow' : 'ask',

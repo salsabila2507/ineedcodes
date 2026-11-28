@@ -132,11 +132,23 @@ export async function fetchModels(cfg, signal) {
   const alias = String(cfg.modelAlias ?? '').trim();
   if (!alias) {
     aliasCache.delete(cfg.baseUrl);
-    return ids;
+    return filterModels(ids, cfg.modelSuffix);
   }
   const { list, map } = buildModelAlias(ids, alias);
   aliasCache.set(cfg.baseUrl, map);
-  return list;
+  return filterModels(list, cfg.modelSuffix);
+}
+
+// "modelSuffix": show only models whose id ends with one of these
+// comma-separated endings, so a gateway with hundreds of models stays short
+export function modelSuffixes(value) {
+  return String(value ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+export function filterModels(ids, suffix) {
+  const endings = modelSuffixes(suffix);
+  if (!endings.length) return ids;
+  return ids.filter(id => endings.some(e => String(id).toLowerCase().endsWith(e)));
 }
 
 // human guidance for the status codes a hosted gateway actually returns
