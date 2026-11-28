@@ -1124,11 +1124,13 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
   // reject: a cancelled prompt (Ctrl+C) or a stray error would otherwise end
   // as an unhandled rejection instead of a message on screen
   async function handle(input) {
+    const wasBusy = busy;
     try { return await handleInner(input); }
     catch (err) {
       if (closed) return;
       if (err?.aborted) say(dim('  cancelled.'));
       else say(red('  ✗ ' + (err?.message ?? String(err))));
+      if (!wasBusy && busy) { busy = false; await afterTask(); }
     }
   }
 
@@ -1453,8 +1455,17 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         say((res.aborted ? yellow('  ■ Stopped') : green('  ⚡ Boost task done')) + dim(` in ${b.branch}`));
         const c = boost.commitBoost(b.dir, 'boost: ' + objective.slice(0, 80));
         if (c && c.empty) say(T.muted('  nothing changed, no commit made'));
-        if (c && !c.ok) say(red('  boost commit failed: ' + (c.error ?? 'unknown')));
-        const d = boost.boostDiff(b.dir);
+        if (!c.ok) {
+          say(red('  boost commit failed: ' + (c.error || 'unknown')));
+          say(dim('Worktree kept: ' + b.dir + ' (' + b.branch + '). Commit there by hand, or /boost cancel removes it.'));
+          return;
+        }
+        const d = boost.boostDiff(b.dir, b.base);
+        if (!d.ok) {
+          say(red('  boost diff failed: ' + d.error));
+          say(dim('Worktree kept: ' + b.dir + ' (' + b.branch + '). /boost cancel removes it.'));
+          return;
+        }
         if (d.files.length) {
           say(T.muted('  ── boost changes ──'));
           if (d.stat) say(T.muted('  ' + trunc(String(d.stat).split('\n').pop() ?? '', 100)));
@@ -1580,9 +1591,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         return;
       }
       busy = true;
+      let mgr = null;
       try {
         const { McpManager } = await import('./mcp.js');
-        const mgr = new McpManager();
+        mgr = new McpManager();
         const errors = await mgr.loadFromConfig();
         for (const e of errors) say(red('  ✗ ' + e));
         const tools = await mgr.allTools();
@@ -1592,8 +1604,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         } else if (!errors.length) {
           say(yellow('  Servers connected but exposed no tools.'));
         }
-        mgr.killAll();
       } catch (err) { say(red('  ✗ ' + err.message)); }
+      finally { mgr?.killAll(); }
       busy = false;
       return afterTask();
     }
