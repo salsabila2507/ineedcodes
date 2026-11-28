@@ -460,6 +460,30 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     process.exit(0);
   }
 
+  // one way to pick from a list everywhere: arrow keys in the full-screen UI
+  // and on a real terminal, a numbered prompt in pipes and on legacy consoles.
+  // Resolves the picked option's value, or null when the person cancels
+  async function choose(title, options) {
+    const labels = options.map(o => o.label + (o.hint ? '  ·  ' + o.hint : '') + (o.current ? '  (current)' : ''));
+    if (TUI) {
+      say(T.muted('  ' + title));
+      const idx = await pickFromList(labels, Math.max(0, options.findIndex(o => o.current)));
+      return idx === null ? null : options[idx].value;
+    }
+    if (canPickInteractive()) {
+      const r = await pickInteractive(labels, { title, initial: Math.max(0, options.findIndex(o => o.current)), hint: 'Up/Down move · Enter pick · type to filter · Esc cancel' });
+      const idx = r.value === undefined ? -1 : labels.indexOf(r.value);
+      return idx < 0 ? null : options[idx].value;
+    }
+    say(T.muted('   ' + title));
+    labels.forEach((l, i) => say('   ' + (i + 1) + '. ' + l));
+    const a = (await ask('   pick a number (Enter to cancel): ')).trim();
+    if (!a) return null;
+    const n = Number(a);
+    if (!Number.isInteger(n) || n < 1 || n > options.length) { say(red('   pick 1-' + options.length + '.')); return null; }
+    return options[n - 1].value;
+  }
+
   async function pickModel() {
     let models = [];
     const op = new AbortController();
@@ -906,122 +930,144 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   const commands = {
     '/help': () => {
-      say('  ' + cyan('/model') + '    pick a model from your provider');
-      say('  ' + cyan('/provider') + ' list, switch, add or remove API providers');
-      say('  ' + cyan('/plan') + '     plan mode: read only');
-      say('  ' + cyan('/build') + '    build mode: real changes (default)');
-      say('  ' + cyan('/reason') + '   toggle reasoning low/high');
-      say('  ' + cyan('/perm') + '     permissions: /perm auto | /perm safe | /perm');
-      say('  ' + cyan('/boost') + '    isolated git-worktree run: /boost <objective>');
-      say('  ' + cyan('/config') + '   show provider config (key hidden)');
-      say('  ' + cyan('/memory') + '   memory status, /memory on|off to toggle');
-      say('  ' + cyan('/status') + '   everything about this session at a glance');
-      say('  ' + cyan('/compact') + '  shrink the conversation into a checkpoint');
-      say('  ' + cyan('/depth') + '    answer depth: /depth short|normal|deep');
-      say('  ' + cyan('/theme') + '    pick a color theme (arrow keys): dark, light, mono, nord, dracula, synthwave');
-      say('  ' + cyan('/new') + '     start a fresh session, keep the old saved');
-      say('  ' + cyan('/resume') + '   list sessions, /resume <code> like 1425-0609');
-      say('  ' + cyan('/skills') + '   list installed skills, /skills <name> shows one');
-      say('  ' + cyan('/init') + '     scan this folder and write AGENTS.md for the agent');
-      say('  ' + cyan('/mcp') + '     list MCP servers and their tools');
-      say('  ' + cyan('/humanizer') + ' natural-writing pass for pages and posts (on/off)');
-      say('  ' + cyan('/clear') + '    forget this conversation');
-      say('  ' + cyan('/setup') + '    redo provider setup');
-      say('  ' + cyan('/reset') + '    clear saved config');
-      say('  ' + cyan('/help') + '     this list. Type normally to work, steer mid-task anytime');
-      say(dim('  while a task runs: your text is a live steer, /stop cancels it'));
-      say('  ' + cyan('/exit') + '     quit (or type q, keluar)');
-      say(dim('  tip: perintah bisa tanpa slash (contoh: provider, model, perm auto, cls, keluar)'));
+      const row = (cmd, desc) => say('  ' + cyan(cmd.padEnd(11)) + ' ' + desc);
+      say(T.text('  Just type what you want in normal words, like "make a landing page".'));
+      say(T.muted('  Not sure? ') + T.text('menu') + T.muted(' lets you pick with the arrow keys. Commands work without the slash too.'));
+      say(T.muted('  ── getting started ──'));
+      row('/menu', 'everything you can do, in one list');
+      row('/config', 'settings: permissions, answer length, theme, model');
+      row('/model', 'pick a model from your provider');
+      row('/provider', 'list, switch, add or remove API providers');
+      row('/perm', 'ask before changes, or work freely (/perm safe | /perm auto)');
+      row('/status', 'everything about this session at a glance');
+      say(T.muted('  ── how it works ──'));
+      row('/plan', 'plan mode: read only, it only looks and suggests');
+      row('/build', 'build mode: real changes (default)');
+      row('/reason', 'toggle thinking effort normal/deeper');
+      row('/depth', 'answer length: /depth short|normal|deep');
+      row('/memory', 'remember past sessions: /memory on|off');
+      row('/humanizer', 'natural wording for pages and posts (on/off)');
+      row('/theme', 'pick a color theme');
+      say(T.muted('  ── conversations ──'));
+      row('/new', 'start a fresh session, keep the old one saved');
+      row('/resume', 'continue a saved session, /resume <code> like 1425-0609');
+      row('/compact', 'shrink the conversation into a checkpoint');
+      row('/clear', 'forget this conversation');
+      say(T.muted('  ── advanced ──'));
+      row('/boost', 'isolated git-worktree run: /boost <objective>');
+      row('/init', 'scan this folder and write AGENTS.md for the agent');
+      row('/skills', 'list installed skills, /skills <name> shows one');
+      row('/mcp', 'list MCP servers and their tools');
+      row('/setup', 'redo provider setup');
+      row('/reset', 'clear saved config');
+      row('/help', 'this list');
+      row('/exit', 'quit (or type q, keluar)');
+      say(dim('  while a task runs: type to steer it, /stop cancels it'));
+      say(dim('  tip: perintah bisa tanpa slash (contoh: menu, pengaturan, provider, model, perm auto, keluar)'));
     },
-    // one guided menu instead of a wall of toggles: six things a beginner
-    // actually cares about, each a numbered choice in plain language
-    '/config': async arg => {
-      const yn = v => v ? T.success('on') : T.muted('off');
-      const askMode = v => v === 'allow' ? T.success('always allowed') : T.text('asks first');
-      const rows = [
-        ['1. May it change files?', askMode(state.permEdit), '/perm'],
-        ['2. May it run commands?', askMode(state.permShell), '/perm'],
-        ['3. May it use the internet?', state.permNet === 'ask' ? T.text('asks first') : T.success('always allowed'), '/perm'],
-        ['4. Work mode', mode === 'plan' ? T.text('plan (read only)') : T.text('build (can change files)'), '/plan /build'],
-        ['5. Answer length', T.text({ short: 'short', normal: 'normal', deep: 'detailed' }[state.explain] ?? state.explain), '/depth'],
-        ['6. Remember past sessions?', yn(state.memory !== false), '/memory']
-      ];
-      const pickOne = async (question, options) => {
-        say(T.muted('   ' + question));
-        options.forEach((o, i) => say('   ' + (i + 1) + '. ' + o.label + (o.current ? T.muted('  (current)') : '')));
-        const a = (await ask('   pick a number (Enter to cancel): ')).trim();
-        if (!a) return null;
-        const n = Number(a);
-        if (!Number.isInteger(n) || n < 1 || n > options.length) { say(red('   pick 1-' + options.length + '.')); return null; }
-        return options[n - 1].value;
+    // one guided menu instead of a wall of toggles: the things a beginner
+    // actually cares about, each in plain language with a hint per choice.
+    // Arrow keys on a real terminal (it stays open until Done), numbers in pipes
+    '/config': async () => {
+      const allowText = v => v === 'allow' ? 'always allowed' : 'asks first';
+      const save = (patch, msg) => {
+        Object.assign(state, normalize({ ...state, ...patch }));
+        try { saveConfig(state); } catch {}
+        say(green('  ✓ ') + T.text(msg));
+        if (TUI) drawStatus();
       };
-      if (arg) {
-        // old style still works: /config show, and the raw values stay visible
-        const names = rows.map(r => r[2]);
-        if (names.includes(arg.trim())) { say(T.muted('  use: ' + arg.trim())); }
+      const permChoices = (key, what) => ({
+        current: allowText(state[key]),
+        choices: [
+          { label: 'Ask me every time', hint: 'safest, recommended when you are starting out', value: 'ask' },
+          { label: 'Always allowed', hint: 'faster, it never stops to ask', value: 'allow' }
+        ].map(c => ({ ...c, current: c.value === state[key] })),
+        apply: v => save({ [key]: v }, what + ': ' + allowText(v))
+      });
+      const buildSettings = () => [
+        { label: 'May it change files?', question: 'Permission to change files?', ...permChoices('permEdit', 'change files') },
+        { label: 'May it run commands?', question: 'Permission to run commands?', ...permChoices('permShell', 'run commands') },
+        { label: 'May it use the internet?', question: 'Permission to use the internet?', ...permChoices('permNet', 'use the internet') },
+        {
+          label: 'Work mode', question: 'May the agent change files?',
+          current: mode === 'plan' ? 'plan (read only)' : 'build (can change files)',
+          choices: [
+            { label: 'Build', hint: 'it creates and edits files for you', value: 'build', current: mode !== 'plan' },
+            { label: 'Plan', hint: 'read only: it looks and suggests, changes nothing', value: 'plan', current: mode === 'plan' }
+          ],
+          apply: v => {
+            mode = v;
+            Object.assign(state, normalize({ ...state, mode }));
+            say(green('  ✓ ') + T.text('mode: ' + (v === 'plan' ? 'plan (read only)' : 'build (can change files)')));
+            if (TUI) drawStatus();
+          }
+        },
+        {
+          label: 'Answer length', question: 'How long should answers be?',
+          current: { short: 'short', normal: 'normal', deep: 'detailed' }[state.explain] ?? state.explain,
+          choices: [
+            { label: 'Short', hint: 'just the result', value: 'short' },
+            { label: 'Normal', hint: 'what changed and why', value: 'normal' },
+            { label: 'Detailed', hint: 'explains the reasoning, good for learning', value: 'deep' }
+          ].map(c => ({ ...c, current: c.value === state.explain })),
+          apply: v => save({ explain: v }, 'answers: ' + v)
+        },
+        {
+          label: 'Remember past sessions?', question: 'Remember work from past sessions?',
+          current: state.memory !== false ? 'on' : 'off',
+          choices: [
+            { label: 'On', hint: 'it keeps short notes about this project', value: true, current: state.memory !== false },
+            { label: 'Off', hint: 'every session starts from zero', value: false, current: state.memory === false }
+          ],
+          apply: v => save({ memory: v }, 'memory: ' + (v ? 'on' : 'off'))
+        },
+        {
+          label: 'Natural wording', question: 'Rewrite pages and posts so they read naturally?',
+          current: state.humanize !== false ? 'on' : 'off',
+          choices: [
+            { label: 'On', hint: 'cleans up stiff wording in html and markdown it writes', value: true, current: state.humanize !== false },
+            { label: 'Off', hint: 'keeps the text exactly as written', value: false, current: state.humanize === false }
+          ],
+          apply: v => save({ humanize: v }, 'natural wording: ' + (v ? 'on' : 'off'))
+        },
+        {
+          label: 'Thinking effort', question: 'How hard should the model think?',
+          current: state.reasoning === 'high' ? 'deeper' : 'normal',
+          choices: [
+            { label: 'Normal', hint: 'faster and cheaper, fine for most tasks', value: 'low', current: state.reasoning !== 'high' },
+            { label: 'Deeper', hint: 'slower and costs more, for hard problems', value: 'high', current: state.reasoning === 'high' }
+          ],
+          apply: v => save({ reasoning: v }, 'thinking: ' + (v === 'high' ? 'deeper' : 'normal'))
+        },
+        { label: 'Color theme', current: getTheme(), run: () => commands['/theme']('') },
+        { label: 'Model', current: state.model || '(none)', run: () => pickModel() }
+      ];
+      const change = async s => {
+        if (s.run) return s.run();
+        const v = await choose(s.question, s.choices);
+        if (v !== null) s.apply(v);
+      };
+      if (TUI || canPickInteractive()) {
+        for (;;) {
+          const settings = buildSettings();
+          const pick = await choose('Settings: pick one to change', [
+            ...settings.map((s, i) => ({ label: s.label, hint: s.current, value: i })),
+            { label: 'Done', hint: 'close this menu', value: -1 }
+          ]);
+          if (pick === null || pick < 0) return;
+          await change(settings[pick]);
+        }
       }
+      const settings = buildSettings();
       say(T.muted('  ── settings ──'));
-      for (const [label, value, cmd] of rows) say('  ' + label.padEnd(30) + value + T.muted('   (' + cmd + ')'));
-      say('  ' + T.muted('provider  ') + T.text(state.provider || '(none)') + T.muted('   ' + state.baseUrl));
-      say('  ' + T.muted('model     ') + T.text(state.model));
+      settings.forEach((s, i) => say('  ' + ((i + 1) + '. ' + s.label).padEnd(30) + T.text(s.current)));
+      say('  ' + T.muted('provider  ') + T.text(state.provider || '(none)') + T.muted('   ' + state.baseUrl + '   change: /provider'));
       say('  ' + T.muted('API key   ') + T.muted('saved, hidden'));
-      const arg2 = arg?.trim();
-      if (!arg2) {
-        const n = (await ask('  change what? (number, Enter to quit): ')).trim();
-        if (!n) return;
-        const num = Number(n);
-        if (num === 1 || num === 2 || num === 3) {
-          const key = num === 1 ? 'permEdit' : num === 2 ? 'permShell' : 'permNet';
-          const v = await pickOne('Permission to ' + ['change files', 'run commands', 'use the internet'][num - 1] + '?', [
-            { label: 'always allowed (works without asking)', value: 'allow' },
-            { label: 'ask me every time (safest)', value: 'ask' }
-          ]);
-          if (!v) return;
-          Object.assign(state, normalize({ ...state, [key]: v }));
-          try { saveConfig(state); } catch {}
-          say(green('  now: ') + T.text(v === 'allow' ? 'always allowed' : 'asks first'));
-          if (TUI) drawStatus();
-          return;
-        }
-        if (num === 4) {
-          const v = await pickOne('May the agent change files?', [
-            { label: 'yes (build)', value: 'build' },
-            { label: 'read only first (plan)', value: 'plan' }
-          ]);
-          if (!v) return;
-          mode = v;
-          Object.assign(state, normalize({ ...state, mode }));
-          say(green('  mode: ') + T.text(v === 'plan' ? 'plan (read only)' : 'build (can change files)'));
-          if (TUI) drawStatus();
-          return;
-        }
-        if (num === 5) {
-          const v = await pickOne('How long should answers be?', [
-            { label: 'short (results only)', value: 'short' },
-            { label: 'normal', value: 'normal' },
-            { label: 'detailed (with explanations)', value: 'deep' }
-          ]);
-          if (!v) return;
-          Object.assign(state, normalize({ ...state, explain: v }));
-          try { saveConfig(state); } catch {}
-          say(green('  answers: ') + T.text(v));
-          if (TUI) drawStatus();
-          return;
-        }
-        if (num === 6) {
-          const v = await pickOne('Remember work from past sessions?', [
-            { label: 'on', value: true },
-            { label: 'off', value: false }
-          ]);
-          if (v == null) return;
-          Object.assign(state, normalize({ ...state, memory: v }));
-          try { saveConfig(state); } catch {}
-          say(green('  memory: ') + T.text(v ? 'on' : 'off'));
-          if (TUI) drawStatus();
-          return;
-        }
-        say(red('  pick 1-6, or Enter to quit.'));
-      }
+      const n = (await ask('  change what? (number, Enter to quit): ')).trim();
+      if (!n) return;
+      const s = settings[Number(n) - 1];
+      if (!Number.isInteger(Number(n)) || !s) { say(red('  pick 1-' + settings.length + ', or Enter to quit.')); return; }
+      await change(s);
     },
     '/theme': async arg => {
       const apply = v => {
@@ -1213,6 +1259,29 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       return;
     }
     if (input === '/model') { busy = true; try { await pickModel(); } finally { busy = false; } return afterTask(); }
+    if (input === '/menu') {
+      busy = true;
+      let pick = null;
+      try {
+        pick = await choose('What do you want to do?', [
+          { label: 'Change settings', hint: 'permissions, answer length, theme, model', value: '/config' },
+          { label: 'Pick a model', hint: 'which AI model does the work', value: '/model' },
+          { label: 'Switch or add a provider', hint: 'where your API key lives', value: '/provider' },
+          { label: 'Ask before changes, or work freely', hint: 'permissions', value: '/perm' },
+          { label: 'See how things are set up', hint: 'model, folder, tokens used', value: '/status' },
+          { label: 'Look only, change nothing', hint: 'plan mode', value: '/plan' },
+          { label: 'Allow changes again', hint: 'build mode', value: '/build' },
+          { label: 'Continue an earlier session', hint: 'pick from saved conversations', value: '/resume' },
+          { label: 'Start a fresh conversation', hint: 'the old one stays saved', value: '/new' },
+          { label: 'Explain this folder to the agent', hint: 'writes AGENTS.md', value: '/init' },
+          { label: 'Change the colors', hint: 'theme', value: '/theme' },
+          { label: 'Show every command', hint: 'help', value: '/help' },
+          { label: 'Quit', hint: 'your session is saved', value: '/exit' }
+        ]);
+      } finally { busy = false; }
+      if (pick) return handleInner(pick);
+      return afterTask();
+    }
     if (input === '/plan') { mode = 'plan'; Object.assign(state, normalize({ ...state, mode })); say(yellow('Plan mode: read only.')); if (TUI) drawStatus(); return; }
     if (input === '/build') { mode = 'build'; Object.assign(state, normalize({ ...state, mode })); say(green('Build mode: real changes.')); if (TUI) drawStatus(); return; }
     if (input === '/reason') {
@@ -1237,6 +1306,22 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       }
       if (parts[0] === 'shell' && ['allow', 'ask'].includes(parts[1])) {
         return apply(state.permEdit, parts[1], `Shell permission: ${parts[1]}.`);
+      }
+      if (!arg && (TUI || canPickInteractive())) {
+        busy = true;
+        let pick = null;
+        try {
+          const now = state.permEdit === 'ask' && state.permShell === 'ask' ? 'safe' : state.permEdit === 'allow' && state.permShell === 'allow' ? 'auto' : '';
+          pick = await choose('Should it ask before it changes files or runs commands?', [
+            { label: 'Ask first', hint: 'you approve every change, safest when starting out', value: 'safe', current: now === 'safe' },
+            { label: 'Work freely', hint: 'no questions, faster for people who trust it', value: 'auto', current: now === 'auto' },
+            { label: 'Choose one by one', hint: 'opens settings', value: 'custom', current: !now }
+          ]);
+        } finally { busy = false; }
+        if (pick === 'safe') apply('ask', 'ask', 'Permissions: edits and shell ask first.');
+        if (pick === 'auto') apply('allow', 'allow', 'Permissions: edits and shell run without asking.');
+        if (pick === 'custom') return handleInner('/config');
+        return afterTask();
       }
       say(T.muted('  ── permissions ──'));
       say('  ' + T.muted('edit') + '   ' + T.text(state.permEdit) + T.muted('  (write_file, edit_file, delete_file)'));
@@ -1586,10 +1671,10 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       plan: '/plan', build: '/build', depth: '/depth', reason: '/reason',
       theme: '/theme', tema: '/theme', skills: '/skills', init: '/init', compact: '/compact',
       new: '/new', clear: '/clear', cls: '/clear', bersihkan: '/clear',
-      reset: '/reset', setup: '/setup', config: '/config',
+      reset: '/reset', setup: '/setup', config: '/config', settings: '/config', setting: '/config', pengaturan: '/config', atur: '/config',
       exit: '/exit', quit: '/exit', q: '/exit', ':q': '/exit', ':q!': '/exit',
       keluar: '/exit', bye: '/exit', stop: '/stop', mcp: '/mcp', boost: '/boost',
-      bantuan: '/help', menu: '/help', tolong: '/help'
+      bantuan: '/help', menu: '/menu', tolong: '/help'
     };
     if (one[word] && !rest) return one[word];
 
@@ -1635,10 +1720,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           dim('    "create an animated landing page in this folder"'),
           dim('    "fix the failing tests and tell me what was wrong"'),
           dim('    "explain this repository like I am a beginner"'),
-          '  ' + dim('Helpers: /help commands · /perm auto or safe · /model · /memory on|off')
+          '  ' + dim('Not sure what to do? Type ') + bold('menu') + dim(' and pick with the arrow keys.'),
+          '  ' + dim('Settings: /config · ask first or work freely: /perm · all commands: /help')
         ]
       : [
-          dim('Type what you want. /help for commands.')
+          dim('Type what you want. ') + bold('menu') + dim(' shows what you can do, /help lists every command.')
             + (state.permEdit === 'ask' || state.permShell === 'ask' ? dim(' Edits and shell ask first: /perm auto to relax.') : '')
         ];
     for (const l of lines) say(l);
@@ -1688,6 +1774,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
 
   // ── slash command menu: filters while you type / ──
   const SLASH_COMMANDS = [
+    { cmd: '/menu', desc: 'everything you can do, pick with the arrow keys' },
     { cmd: '/model', desc: 'pick a model from your provider' },
     { cmd: '/provider', desc: 'list, switch, add or remove API providers' },
     { cmd: '/plan', desc: 'plan mode: read only' },
@@ -2004,11 +2091,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     else if (rowsWiped) { /* zone repaint happens on next redraw */ }
   }
 
-  function pickFromList(items) {
+  function pickFromList(items, initial = 0) {
     return new Promise(resolve => {
       pickerActive = true;
       pickerItems = items;
-      pickerSelected = 0;
+      pickerSelected = Math.max(0, Math.min(items.length - 1, initial));
       pickerResolver = resolve;
       // lift the chat floor so streaming/approval output cannot paint over the list
       chatBot = chatFloor();
