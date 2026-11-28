@@ -105,6 +105,10 @@ function mock(script) {
         case 'tools':
           resp = hadTools ? reply('Wrote hello.txt. Evidence above.') : call('write_file', { path: 'hello.txt', content: 'hello from ineed' });
           break;
+        case 'slow':
+          if (!hadTools) resp = call('shell', { command: 'node -e "setTimeout(function(){},2500)"' });
+          else resp = reply('SLOW-DONE');
+          break;
         case 'shell':
           if (!hadTools) resp = call('shell', { command: 'echo ineed-shell-e2e' });
           else resp = reply(joined.includes('ineed-shell-e2e') && joined.includes('exit code: 0') ? 'SHELL-VERIFIED' : 'SHELL-BROKEN');
@@ -1302,12 +1306,25 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('telegram: an empty allowlist refuses every chat, including its own id',
     seen.length > 0 && seen.every(s => /not allowed/.test(s)) && fs.readdirSync(idle).length === 0, seen.join(' ').slice(0, 300));
 
-  // shutdown: an abort stops the run, and queued work never starts
-  const started = events.length;
+  // shutdown: the running task is aborted, and queued work never starts
+  const { server: slowServer, port: slowPort } = await mock('slow');
+  const slowCfg = normalize({ baseUrl: 'http://127.0.0.1:' + slowPort + '/v1', apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow', mcp: false, memory: false, humanize: false });
+  const slowEvents = [];
+  const slowHost = createHost(slowCfg, { cwd: fs.mkdtempSync(path.join(TMP, 'serve-stop-')), onEvent: e => slowEvents.push(e) });
+  const running = slowHost.submit('take your time');
+  const waiting = slowHost.submit('never starts');
+  await new Promise(r => setTimeout(r, 800));
+  await slowHost.stop(20_000);
+  const [firstTask, secondTask] = await Promise.all([running, waiting]);
+  check('serve: shutdown aborts the running task and nothing queued starts',
+    firstTask.aborted === true && /Stopped before it started/.test(secondTask.answer)
+      && !slowEvents.some(e => e.type === 'started' && e.text === 'never starts'),
+    JSON.stringify([firstTask.aborted, secondTask.answer, slowEvents.map(e => e.type)]));
+  slowServer.close();
   await host.stop(1000);
   const afterStop = await host.submit('say hi again');
-  check('serve: shutdown drops the queue instead of starting another task',
-    /Stopped before it started/.test(afterStop.answer) && events.length === started, afterStop.answer + ' ' + events.length);
+  check('serve: a task offered after shutdown is refused at once',
+    /Stopped before it started/.test(afterStop.answer), afterStop.answer);
   mockServer.close();
 }
 
