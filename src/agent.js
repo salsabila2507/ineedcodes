@@ -348,6 +348,13 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         }
         return { answer, changed: [...changed], ran, todos: [...todos], usage: { ...usage }, aborted: false };
       }
+      hooks.onRunStart?.({
+        signal: ctrl.signal,
+        abort: reason => {
+          if (reason === 'steer') hooks.onNote?.('applying your steer once the running tools finish');
+          else ctrl.abort(reason);
+        }
+      });
       // spawn_agent pre-pass: read-only workers run in parallel (max 4), writers sequentially
       const spawnResults = new Map();
       const spawnCalls = calls.filter(c => c.function?.name === 'spawn_agent');
@@ -532,7 +539,10 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
       };
 
       for (let ci = 0; ci < calls.length;) {
-        if (ctrl.signal.aborted) break;
+        if (ctrl.signal.aborted) {
+          for (const skipped of calls.slice(ci)) messages.push({ role: 'tool', tool_call_id: skipped.id, content: 'Skipped: the task was stopped.' });
+          break;
+        }
         const call = calls[ci];
         const parallelSafe = call.function?.name !== 'spawn_agent'
           && !spawnResults.has(call.id)
@@ -566,6 +576,7 @@ export async function runObjective(cfg, objective, cwd, history, hooks = {}, ext
         });
         ci = end;
       }
+      hooks.onRunStart?.(ctrl);
     }
   } catch (err) {
     // a failed task must still say what it managed to do, otherwise the user

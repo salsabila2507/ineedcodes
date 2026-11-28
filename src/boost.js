@@ -32,13 +32,16 @@ export function startBoost(cwd) {
   const n = (Date.now() % 1_000_000) * 10 + (process.pid % 10);
   const dir = path.join(os.tmpdir(), 'ineed-boost-' + n);
   const branch = 'ineed-boost-' + n;
-  const r = git(['worktree', 'add', '-b', branch, dir], cwd);
+  const base = git(['rev-parse', 'HEAD'], cwd);
+  if (!base.ok) return { ok: false, error: base.out };
+  const r = git(['worktree', 'add', '-b', branch, dir, base.out], cwd);
   if (!r.ok) return { ok: false, error: r.out };
-  return { ok: true, dir, branch };
+  return { ok: true, dir, branch, base: base.out };
 }
 
 export function commitBoost(dir, message) {
-  git(['add', '-A'], dir);
+  const add = git(['add', '-A'], dir);
+  if (!add.ok) return { ok: false, error: add.out };
   // no empty commit: if the task changed nothing, there is nothing to reconcile
   const pending = git(['diff', '--cached', '--name-only'], dir);
   if (!pending.out) return { ok: true, empty: true };
@@ -46,10 +49,11 @@ export function commitBoost(dir, message) {
   return { ok: r.ok, error: r.out };
 }
 
-export function boostDiff(dir) {
-  const stat = git(['diff', 'HEAD~1', '--stat'], dir);
-  const files = git(['diff', 'HEAD~1', '--name-only'], dir);
-  return { stat: stat.out, files: files.out.split('\n').filter(Boolean) };
+export function boostDiff(dir, base) {
+  const stat = git(['diff', base, 'HEAD', '--stat'], dir);
+  const files = git(['diff', base, 'HEAD', '--name-only'], dir);
+  if (!stat.ok || !files.ok) return { ok: false, error: files.ok ? stat.out : files.out, stat: '', files: [] };
+  return { ok: true, stat: stat.out, files: files.out.split('\n').filter(Boolean) };
 }
 
 export function mergeBoost(cwd, branch) {

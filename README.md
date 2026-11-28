@@ -185,7 +185,7 @@ Everything lives in `~/.ineedcodes/config.json`. The guided menus (`/config`, `/
 | `permEdit` | `ask` | `ask` before editing files, `allow` to stop asking |
 | `permShell` | `ask` | `ask` before running commands, `allow` to stop asking |
 | `permNet` | `allow` | `ask` before fetching web pages or using MCP tools |
-| `humanize` | `true` | run the copy pass on written html/md/txt (adds a model call per file) |
+| `humanize` | `true` | run the copy pass on written html/md, leaving code blocks alone (adds a model call per file) |
 | `memory` | `true` | remember durable facts between sessions |
 | `mcp` | `true` | load configured MCP servers and their tools |
 | `reasoning` | `low` | `high` thinks longer, costs more |

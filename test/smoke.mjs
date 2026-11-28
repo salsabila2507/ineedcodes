@@ -1873,6 +1873,128 @@ fs.rmSync(CFG, { recursive: true, force: true });
     }
   } finally { globalThis.fetch = originalFetch; }
 }
+// ── review fixes: env keys stay out of config.json, session ids stay in their folder ──
+{
+  const dir = fs.mkdtempSync(path.join(TMP, 'envcfg-'));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ providers: { work: { baseUrl: 'https://w.invalid/v1', apiKey: 'sk-FILE', model: 'm' } }, provider: 'work' }), { mode: 0o600 });
+  const url = pathToFileURL(path.join(ROOT, 'src', 'config.js')).href;
+  const code = 'const c = await import(' + JSON.stringify(url) + '); const s = c.loadConfig(); if (s.apiKey !== "sk-TEMP") throw new Error("env key not used"); s.theme = "nord"; c.saveConfig(s);';
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, INEED_CONFIG_DIR: dir, INEED_API_KEY: 'sk-TEMP', INEED_MAX_STEPS: '7' } });
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  check('config: env API key is used but never written to config.json',
+    r.status === 0 && saved.providers.work.apiKey === 'sk-FILE' && saved.apiKey === 'sk-FILE' && saved.theme === 'nord' && saved.maxSteps !== 7,
+    (r.stderr || '') + JSON.stringify(saved));
+}
+{
+  const dir = fs.mkdtempSync(path.join(TMP, 'sesscfg-'));
+  fs.writeFileSync(path.join(dir, 'evil.json'), JSON.stringify({ id: '../pwn', history: [{ role: 'user', content: 'x' }] }));
+  const url = pathToFileURL(path.join(ROOT, 'src', 'sessions.js')).href;
+  const code = 'const s = await import(' + JSON.stringify(url) + ');' +
+    'const loaded = s.loadSession("../evil");' +
+    'const id = s.saveSession({ id: "../pwn", history: [{ role: "user", content: "x" }] });' +
+    'console.log(JSON.stringify({ loaded, id, deleted: s.deleteSession("../evil") }));';
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, INEED_CONFIG_DIR: dir } });
+  let res = {};
+  try { res = JSON.parse(r.stdout.trim()); } catch {}
+  check('sessions: ids with path segments cannot read, write or delete outside the folder',
+    r.status === 0 && res.loaded === null && /^\d{4}-\d{4}(-\d+)?$/.test(res.id) && res.deleted === false
+      && fs.existsSync(path.join(dir, 'evil.json')) && !fs.existsSync(path.join(dir, 'pwn.json')),
+    (r.stderr || '') + r.stdout);
+}
+
+// ── review fixes: humanizer leaves markdown code alone ──
+{
+  const { humanizeFile } = await import('../src/humanize.js');
+  const file = path.join(TMP, 'code-in-readme.md');
+  const fenced = '~~~js\nif (!!user) {\n    return a \u2014 b;\n}\n~~~\n';
+  fs.writeFileSync(file, '# A cutting-edge tool\n\n- item\n  - nested  item\n\n' + fenced + '\nRun ' + '\x60npm  test!!\x60' + ' first.\n\n    indented  !!code\n');
+  let modelCalled = false;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { modelCalled = true; throw new Error('model must not run on documents with code'); };
+  try { await humanizeFile({ apiKey: 'fixture', baseUrl: 'http://fixture.invalid', model: 'fixture' }, file, undefined, { root: TMP }); }
+  finally { globalThis.fetch = originalFetch; }
+  const out = fs.readFileSync(file, 'utf8');
+  check('humanizer: markdown code blocks, inline code and indentation survive',
+    out.includes('# A new tool') && out.includes(fenced) && out.includes('\x60npm  test!!\x60') && out.includes('    indented  !!code') && out.includes('  - nested item') && !modelCalled,
+    JSON.stringify(out));
+}
+
+// ── review fixes: an MCP server that exits at once is an error, not a crash ──
+{
+  const dir = fs.mkdtempSync(path.join(TMP, 'mcpdead-'));
+  const conf = path.join(dir, 'mcp.json');
+  const dead = process.platform === 'win32' ? { command: process.execPath, args: ['-e', 'process.exit(0)'] } : { command: 'sh', args: ['-c', 'exit 0'] };
+  fs.writeFileSync(conf, JSON.stringify({ dead }));
+  const url = pathToFileURL(path.join(ROOT, 'src', 'mcp.js')).href;
+  const code = 'const { McpManager } = await import(' + JSON.stringify(url) + '); const m = new McpManager(); const errors = await m.loadFromConfig(); m.killAll(); console.log("ERRORS:" + errors.length);';
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, INEED_MCP_CONFIG: conf }, timeout: 30_000 });
+  check('mcp: a server that exits before initialize is reported, the CLI survives', r.status === 0 && r.stdout.includes('ERRORS:1'), (r.stderr || '') + r.stdout);
+}
+
+// ── review fixes: a steer during a tool batch neither kills commands nor drops results ──
+{
+  const { runObjective } = await import('../src/agent.js');
+  const work = fs.mkdtempSync(path.join(TMP, 'steer-'));
+  const slow = '"' + process.execPath + '" -e "setTimeout(function(){console.log(\'SLOW-DONE\')},1500)"';
+  const bodies = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_, opts) => {
+    const body = JSON.parse(opts.body);
+    bodies.push(body);
+    const msg = bodies.length === 1
+      ? { role: 'assistant', content: null, tool_calls: [
+          { id: 's1', type: 'function', function: { name: 'shell', arguments: JSON.stringify({ command: slow }) } },
+          { id: 's2', type: 'function', function: { name: 'shell', arguments: JSON.stringify({ command: 'echo SECOND' }) } }] }
+      : { role: 'assistant', content: 'STEER-DONE' };
+    return Response.json({ choices: [{ message: msg }] });
+  };
+  let run = null, steered = false, notes = ['go faster'];
+  try {
+    const cfg = { baseUrl: 'http://fixture.invalid/v1', apiKey: 'fixture', model: 'fixture', permShell: 'allow', permEdit: 'allow', mcp: false, memory: false, humanize: false };
+    const hooks = {
+      onRunStart: c => { run = c; },
+      onWorkStart: () => { if (!steered) { steered = true; setTimeout(() => run.abort('steer'), 200); } },
+      drainSteer: () => notes.splice(0)
+    };
+    const res = await runObjective(cfg, 'run the two commands', work, [], hooks, { skipMemory: true });
+    const second = bodies[1]?.messages ?? [];
+    const toolMsgs = second.filter(m => m.role === 'tool');
+    check('steer: tool batch finishes, every call keeps its result, steer reaches the model',
+      res.answer === 'STEER-DONE' && toolMsgs.length === 2 && toolMsgs[0].content.includes('SLOW-DONE') && toolMsgs[1].content.includes('SECOND')
+        && second.some(m => m.role === 'user' && String(m.content).includes('go faster')),
+      JSON.stringify(second.map(m => [m.role, String(m.content ?? '').slice(0, 60)])));
+  } finally { globalThis.fetch = originalFetch; }
+}
+
+// ── review fixes: a boost whose commit fails keeps the worktree and never merges ──
+{
+  const repo = fs.mkdtempSync(path.join(TMP, 'boostfail-'));
+  const g = (args, cwd2 = repo) => spawnSync('git', args, { cwd: cwd2, encoding: 'utf8' });
+  g(['init', '-q', '-b', 'main']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 't']);
+  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+  g(['add', '-A']);
+  g(['commit', '-q', '-m', 'base', '--no-gpg-sign']);
+  fs.writeFileSync(path.join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const { server, port } = await mock('boost');
+  fs.mkdirSync(CFG, { recursive: true });
+  fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:' + port + '/v1', apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow' }), { mode: 0o600 });
+  const { code, out } = await run([], {
+    cwd: repo,
+    staged: [
+      { when: '', send: '/boost create boost.txt with content boosted', immediate: true },
+      { when: 'Worktree kept', send: '/exit' }
+    ]
+  });
+  const kept = (g(['worktree', 'list', '--porcelain']).stdout.match(/^worktree (.*ineed-boost-\d+)$/m) ?? [])[1];
+  check('boost: failed commit keeps the worktree and its files, nothing merged',
+    code === 0 && out.includes('boost commit failed') && !out.includes('Merged') && !out.includes('merge into')
+      && Boolean(kept) && fs.existsSync(path.join(kept, 'boost.txt')) && !fs.existsSync(path.join(repo, 'boost.txt')),
+    out.slice(-500));
+  if (kept) { g(['worktree', 'remove', '--force', kept]); }
+  server.close();
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
