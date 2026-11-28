@@ -29,6 +29,10 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
   ${green('ineed serve')}                 ${dim('HTTP API lokal untuk aplikasi (POST /task, GET /events)')}
   ${green('ineed telegram')}              ${dim('bot Telegram: kirim tugas dari chat')}
 
+  ${bold('Pakai agen lain (tanpa API key)')}
+  ${green('ineed acp')}                   ${dim('lihat agen ACP yang terpasang (Antigravity, OpenCode, Claude Code, ...)')}
+  ${green('ineed acp opencode "tugas"')}  ${dim('jalankan tugas lewat agen itu, pakai login/plan miliknya')}
+
   ${bold('Setup')}
   ${green('ineed provider')}              ${dim('pick a provider by number, switch API/key, add providers')}
   ${green('ineed --reset')}               ${dim('HAPUS semua provider+key, lalu setup ulang')}
@@ -163,6 +167,209 @@ if (args[0] === 'serve' || args[0] === 'telegram') {
   console.log(dim(chats.length ? '  chats allowed: ' + chats.join(', ') : '  every chat is refused until you add its id: --chats <id> (the bot replies with the id it saw)'));
   console.log(yellow('  messages run commands and edit files in this folder without asking. Keep it to chats you trust.'));
   await new Promise(() => {});
+}
+
+// ACP: borrow another agent (Antigravity, OpenCode, Goose, Claude Code, Codex)
+// that is already signed in, so no API key is needed here. 'ineed acp' lists what
+// this computer has; 'ineed acp <agent> "<task>"' runs one task; without a task
+// it opens a chat that stays in one session.
+if (args[0] === 'acp') {
+  const { AGENTS, detect, findAgent, connect, describeUpdate, authKind, AUTH_REQUIRED } = await import('./acp.js');
+  const list = detect();
+  const agentArg = (args[1] ?? '').trim();
+  if (!agentArg || agentArg === 'list') {
+    console.log(bold('Agents ineed can drive') + dim('  no API key, the agent keeps its own sign-in'));
+    for (const a of list) {
+      console.log('  ' + (a.found ? green('✓') : dim('·')) + ' ' + bold(a.short.padEnd(5))
+        + dim(a.id.padEnd(12)) + dim(a.found ? a.why : 'not installed'));
+    }
+    const first = list.find(a => a.found)?.short ?? 'oc';
+    console.log('');
+    console.log(dim('  one task: ') + green('ineed acp ' + first + ' "fix the failing tests"'));
+    console.log(dim('  chat:     ') + green('ineed acp ' + first));
+    if (!list.some(a => a.found)) console.log(dim('  Install one of these and sign in with its own command first, then run this again.'));
+    process.exit(0);
+  }
+  const agent = findAgent(agentArg);
+  if (!agent) {
+    console.error(red('No agent named "' + agentArg + '".') + dim('  Known: ' + AGENTS.map(a => a.id).join(', ')));
+    process.exit(1);
+  }
+  const here = list.find(a => a.id === agent.id);
+  if (!here?.found) {
+    console.error(red(agent.name + ' is not installed here') + dim(' (no "' + agent.commands.join('" or "') + '" command found).'));
+    console.error(dim('  1. install: ') + agent.install);
+    console.error(dim('  2. sign in once: ') + agent.login);
+    console.error(dim('  3. run this again.'));
+    process.exit(1);
+  }
+  const cfg = loadConfig() ?? {};
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (agent.personOnly && !interactive) {
+    console.error(red('  ' + agent.name + ' only runs when you type in a terminal yourself, not from a script or a pipe.'));
+    console.error(dim('  Google suspends accounts used through automation. Use another agent (for example opencode) for scripts.'));
+    process.exit(1);
+  }
+  let rl = null, ask = null;
+  const readline = await import('node:readline');
+  const { makeInput } = await import('./ui.js');
+  // the keyboard: closed while the agent's own sign-in screen needs it, then reopened
+  const openInput = () => {
+    rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    ask = makeInput(rl);
+    rl.on('SIGINT', () => cancelTurn());
+  };
+  const acpCwd = process.cwd();
+  // same meaning as /config: allow for both edits and commands means no questions
+  const autoAllow = cfg.permEdit === 'allow' && cfg.permShell === 'allow';
+  let printed = '';
+  const endLine = () => { if (printed && !printed.endsWith('\n')) process.stdout.write('\n'); printed = ''; };
+  const onPermission = async params => {
+    const options = params?.options ?? [];
+    const allow = options.find(o => o.kind === 'allow_once') ?? options.find(o => o.kind === 'allow_always');
+    const always = options.find(o => o.kind === 'allow_always');
+    const reject = options.find(o => o.kind === 'reject_once') ?? options.find(o => o.kind === 'reject_always');
+    if (autoAllow) return (always ?? allow)?.optionId ?? null;
+    // nobody to ask (piped input): refuse rather than allow silently
+    if (!ask) return reject?.optionId ?? null;
+    endLine();
+    const what = params?.toolCall?.title ?? params?.toolCall?.kind ?? 'a tool';
+    const reply = (await ask(yellow('  Allow: ' + what + '?') + dim(always ? ' [y = yes, a = always, N = no]' : ' [y/N]'))).trim().toLowerCase();
+    if (always && (reply === 'a' || reply === 'always' || reply === 'selalu')) return always.optionId;
+    if (['y', 'yes', 'ya', 'iya'].includes(reply)) return allow?.optionId ?? null;
+    return reject?.optionId ?? null;
+  };
+  // a tool line must not spend the whole width on a path: drop this folder's
+  // prefix, keep ~ short, and clamp to the terminal so nothing wraps
+  const tidy = line => {
+    const home = os.homedir();
+    let text = String(line).split(acpCwd + path.sep).join('');
+    if (home && home !== path.sep) text = text.split(home).join('~');
+    const width = Math.max(20, (process.stdout.columns || 80) - 2);
+    return text.length <= width ? text : text.slice(0, width - 1) + '…';
+  };
+  const onUpdate = update => {
+    const d = describeUpdate(update);
+    if (!d) return;
+    if (d.stream) { process.stdout.write(d.text); printed += d.text; return; }
+    endLine();
+    console.log(dim(tidy(d.line)));
+  };
+  const chooseAuth = async methods => {
+    if (!ask) return null;
+    console.log(yellow('  ' + agent.name + ' wants you to sign in first.'));
+    methods.forEach((m, i) => console.log('  ' + bold(String(i + 1)) + '. ' + (m.name ?? m.id) + (m.description ? dim('  ' + m.description) : '')
+      + (authKind(m) === 'terminal' ? dim('  (runs: ' + [here.command, ...agent.args, ...(m.args ?? [])].join(' ') + ')') : '')));
+    const reply = (await ask(dim('  Pick a number to sign in, or Enter to stop:'))).trim();
+    return methods[Number(reply) - 1] ?? null;
+  };
+  // --model and --mode pick from what the agent offers; everything else is the task
+  const words = [];
+  let modelArg = null;
+  let modeArg = null;
+  for (let i = 2; i < args.length; i++) {
+    const word = args[i];
+    if (word === '-m' || word === '--model') { modelArg = args[++i] ?? ''; continue; }
+    if (word === '--mode') { modeArg = args[++i] ?? ''; continue; }
+    words.push(word);
+  }
+  const oneShot = words.join(' ').trim();
+  let session = null;
+  let busy = false;
+  const cancelTurn = () => {
+    if (busy && session) { session.agent.cancel(); console.log(dim('\n  stopping...')); return; }
+    session?.agent.stop();
+    process.exit(130);
+  };
+  if (interactive) openInput();
+  process.on('SIGINT', cancelTurn);
+  const aroundLogin = async login => {
+    rl?.close();
+    try { return await login(); } finally { if (interactive) openInput(); }
+  };
+  // the agent decides what can change; ineed only shows and sets what it offers
+  const optionOf = category => (session?.agent.configOptions ?? []).find(o => o.category === category || o.id === category);
+  const optionName = value => {
+    for (const o of session.agent.configOptions ?? []) {
+      const hit = (o.options ?? []).find(x => x.value === value);
+      if (hit) return hit.name ?? hit.value;
+    }
+    return value;
+  };
+  const showOption = option => {
+    if (!option) { console.log(dim('  this agent does not offer ' + (option === undefined ? 'that' : 'it'))); return; }
+    console.log(dim('  ' + option.name.toLowerCase() + ':'));
+    (option.options ?? []).forEach((o, i) => {
+      const current = o.value === option.currentValue;
+      console.log('  ' + (current ? green('●') : dim('○')) + ' ' + bold(String(i + 1).padStart(2)) + '. ' + (current ? bold(o.name ?? o.value) : (o.name ?? o.value)));
+    });
+  };
+  // a number, an exact value or name, or a unique part of one
+  const chooseOption = async (option, want) => {
+    if (!option) return console.log(yellow('  this agent does not offer that'));
+    if (!want) return showOption(option);
+    const lower = want.toLowerCase();
+    const list = option.options ?? [];
+    const hit = list[Number(want) - 1] && String(Number(want)) === want
+      ? list[Number(want) - 1]
+      : list.find(o => o.value === want)
+        ?? list.find(o => String(o.name ?? '').toLowerCase() === lower)
+        ?? list.filter(o => String(o.name ?? '').toLowerCase().includes(lower) || o.value.toLowerCase().includes(lower))[0];
+    if (!hit) return console.log(yellow('  no ' + option.name.toLowerCase() + ' called ' + want) + dim('  try /' + option.category));
+    try {
+      await session.agent.setConfig(option.id, hit.value);
+      console.log(dim('  ' + option.name.toLowerCase() + ': ') + bold(hit.name ?? hit.value));
+    } catch (err) {
+      console.log(red('  could not change it: ' + String(err?.message ?? err)));
+    }
+  };
+  const send = async text => {
+    printed = '';
+    busy = true;
+    try {
+      const r = await session.agent.prompt(text);
+      endLine();
+      const why = r?.stopReason ?? 'end_turn';
+      if (why === 'cancelled') console.log(dim('  stopped.'));
+      else if (why === 'max_tokens' || why === 'max_turn_requests') console.log(yellow('  The agent hit its limit (' + why + ') before finishing.'));
+      else if (why === 'refusal') console.log(yellow('  The agent refused this task.'));
+    } finally { busy = false; }
+  };
+  try {
+    session = await connect({ command: here.command, args: agent.args, cwd: acpCwd, onUpdate, onPermission, chooseAuth, aroundLogin, terminalAuth: interactive && process.platform !== 'win32' });
+    if (modelArg) await chooseOption(optionOf('model'), modelArg);
+    if (modeArg) await chooseOption(optionOf('mode'), modeArg);
+    if (oneShot) {
+      await send(oneShot);
+    } else if (!ask) {
+      console.error(red('  Give a task: ') + 'ineed acp ' + agent.id + ' "<task>"' + dim('  (chat needs a terminal)'));
+      process.exitCode = 1;
+    } else {
+      console.log(dim('  /model  /mode  /exit'));
+      for (;;) {
+        let text;
+        try { text = (await ask(dim(agent.short + ' ›'), { onEof: '/exit' })).trim(); } catch { text = '/exit'; }
+        if (!text) continue;
+        const [command, ...rest] = text.split(/\s+/);
+        if (['/exit', '/quit', 'exit', 'quit', 'keluar'].includes(text.toLowerCase())) break;
+        if (command === '/model' || command === '/mode' || command === '/thinking') {
+          const category = command === '/model' ? 'model' : command === '/mode' ? 'mode' : 'thought_level';
+          await chooseOption(optionOf(category), rest.join(' ').trim());
+          continue;
+        }
+        await send(text);
+      }
+    }
+  } catch (err) {
+    endLine();
+    console.error(red('  ' + String(err?.message ?? err)));
+    if (err?.code === AUTH_REQUIRED) console.error(dim('  Sign in once with: ') + agent.login + dim(', then run this again.'));
+    process.exitCode = 1;
+  } finally {
+    session?.agent.stop();
+    rl?.close();
+  }
+  process.exit(process.exitCode ?? 0);
 }
 
 // a gateway that lists several upstreams is shown to the user as one namespace
