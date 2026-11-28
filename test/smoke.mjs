@@ -1135,6 +1135,12 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   const saved = JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8'));
   check('session: "pengaturan" opens settings; natural wording turns off and is saved',
     settings.code === 0 && settings.out.includes('Natural wording') && settings.out.includes('natural wording: off') && saved.humanize === false, settings.out.slice(-600));
+  await run([], { input: '/config\n2\n2\n/exit\n' });
+  check('session: numbered /config keeps its old meaning (2 then 2 = commands ask first)',
+    JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8')).permShell === 'ask');
+  await run([], { input: '/config\n2\n1\n/exit\n' });
+  check('session: numbered /config 2 then 1 = commands always allowed',
+    JSON.parse(fs.readFileSync(path.join(CFG, 'config.json'), 'utf8')).permShell === 'allow');
   const help = await run([], { input: '/help\n/exit\n' });
   check('session: /help explains plain-language use and groups commands',
     help.code === 0 && help.out.includes('Just type what you want') && help.out.includes('getting started') && help.out.includes('/menu'), help.out.slice(-600));

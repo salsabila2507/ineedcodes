@@ -979,8 +979,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       const permChoices = (key, what) => ({
         current: allowText(state[key]),
         choices: [
-          { label: 'Ask me every time', hint: 'safest, recommended when you are starting out', value: 'ask' },
-          { label: 'Always allowed', hint: 'faster, it never stops to ask', value: 'allow' }
+          { label: 'Always allowed', hint: 'faster, it never stops to ask', value: 'allow' },
+          { label: 'Ask me every time', hint: 'safest, recommended when you are starting out', value: 'ask' }
         ].map(c => ({ ...c, current: c.value === state[key] })),
         apply: v => save({ [key]: v }, what + ': ' + allowText(v))
       });
