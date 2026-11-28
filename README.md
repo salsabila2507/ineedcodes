@@ -112,6 +112,29 @@ ineed › explain this repository like I am a beginner
 
 The agent decides what it needs: list files, read code, search, edit, run shell commands, verify the result, and report back with evidence.
 
+## Use another agent, no API key (ACP)
+
+ineed can drive other coding agents through the [Agent Client Protocol](https://agentclientprotocol.com). The agent keeps its own sign-in and its own models, so you use a plan you already have, or a free one, and ineed needs no API key for this.
+
+```bash
+ineed acp                                  # which agents this computer has
+ineed acp opencode "fix the failing tests" # one task
+ineed acp antigravity                      # a chat that stays in one session
+```
+
+| Agent | Install | Sign in once |
+| --- | --- | --- |
+| `antigravity` (Google, free with a Google account) | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` (Windows: `irm https://antigravity.google/cli/install.ps1 \| iex`) | `agy acp --login`, or pick the sign-in ineed offers |
+| `opencode` (has free models) | `npm install -g opencode-ai` | none for free models; `opencode auth login` for others |
+| `claude` (your Claude plan) | `npm install -g @agentclientprotocol/claude-agent-acp` | `claude`, then `/login` |
+| `codex` (your ChatGPT plan) | `npm install -g @agentclientprotocol/codex-acp` | `codex login` |
+| `qwen` | `npm install -g @qwen-code/qwen-code` | `qwen` |
+| `goose` | see goose-docs.ai | `goose configure` |
+
+When the agent asks before changing a file or running a command, ineed asks you: `y` for once, `a` for always, anything else is no. With both permissions set to "always allowed" in `/config` it answers yes on its own. When nobody can answer (piped input), it says no. If the agent says you are not signed in, ineed lists its sign-in options and runs the one you pick.
+
+**Antigravity: only while you drive.** Google allows `agy acp` only in a chat a person drives directly. Accounts used through automation have been suspended. So ineed never uses it from `ineed serve`, `ineed telegram` or a script, and you should not either.
+
 ## From Telegram or an app
 
 The same agent, reachable when the terminal is closed. Both doors feed one task queue, so two tasks never edit the same folder at once.

@@ -2211,6 +2211,129 @@ fs.rmSync(CFG, { recursive: true, force: true });
   if (kept) { g(['worktree', 'remove', '--force', kept]); }
   server.close();
 }
+// ── ACP: drive another agent over the Agent Client Protocol (fake agent, spec v1) ──
+{
+  const acp = await import(pathToFileURL(path.join(ROOT, 'src', 'acp.js')).href);
+  const FAKE = path.join(ROOT, 'test', 'fixtures', 'fake-acp.mjs');
+  const logFile = path.join(TMP, 'acp-log.jsonl');
+  const readLog = () => { try { return fs.readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)); } catch { return []; } };
+  const env = mode => ({ ...process.env, FAKE_ACP_LOG: logFile, FAKE_ACP_MODE: mode });
+
+  // detect: PATH first, renamed adapters, then installer folders off PATH
+  const det = acp.detect(acp.AGENTS, { home: '/h', has: c => c === 'claude-code-acp', exists: p => p === path.join('/h', '.local', 'bin', 'agy') });
+  const byId = Object.fromEntries(det.map(a => [a.id, a]));
+  check('acp: detect finds the old claude adapter name and agy outside PATH',
+    byId.claude.found && byId.claude.command === 'claude-code-acp' && byId.antigravity.found && byId.antigravity.command === path.join('/h', '.local', 'bin', 'agy')
+      && !byId.opencode.found && byId.opencode.command === 'opencode', JSON.stringify(det.map(a => [a.id, a.found, a.command])));
+
+  // full turn: initialize, session/new, prompt, streamed updates, permission, unsupported client call
+  fs.rmSync(logFile, { force: true });
+  const updates = [];
+  let permAsked = null;
+  const { agent, info } = await acp.connect({
+    command: process.execPath, args: [FAKE], cwd: TMP, env: env(''),
+    onUpdate: u => updates.push(acp.describeUpdate(u)),
+    onPermission: async p => { permAsked = p; return 'no-once'; }
+  });
+  const res = await agent.prompt('hello');
+  agent.stop();
+  const text = updates.filter(u => u?.stream).map(u => u.text).join('');
+  const lines = updates.filter(u => u?.line).map(u => u.line);
+  const got = readLog();
+  const init = got.find(m => m.method === 'initialize');
+  const permAnswer = got.find(m => m.id === 1000);
+  const fsAnswer = got.find(m => m.id === 1001);
+  check('acp: initialize sends v1, ineed clientInfo, and no fs/terminal powers',
+    init?.params?.protocolVersion === 1 && init.params.clientInfo?.name === 'ineed' && init.params.clientCapabilities.fs.readTextFile === false
+      && init.params.clientCapabilities.terminal === false && info.agentInfo?.name === 'fake-acp', JSON.stringify(init));
+  check('acp: session/new carries cwd and an empty mcpServers list',
+    got.some(m => m.method === 'session/new' && m.params.cwd === TMP && Array.isArray(m.params.mcpServers) && m.params.mcpServers.length === 0), JSON.stringify(got));
+  check('acp: prompt is a text content block on the session the agent gave',
+    got.some(m => m.method === 'session/prompt' && m.params.sessionId === 'sess_fake_1' && m.params.prompt[0].type === 'text' && m.params.prompt[0].text === 'hello'), JSON.stringify(got));
+  check('acp: message chunks stream in order, thoughts stay hidden, tool lines show',
+    text === 'ECHO:hello PERM:no-once FS:-32601' && !text.includes('thinking') && lines[0].includes('Write notes.txt') && lines.some(l => l.includes('✗')),
+    JSON.stringify(updates));
+  check('acp: permission answer is {outcome:{outcome:"selected",optionId}} with the chosen option',
+    permAsked?.toolCall?.title === 'Write notes.txt' && permAnswer?.result?.outcome?.outcome === 'selected' && permAnswer.result.outcome.optionId === 'no-once', JSON.stringify(permAnswer));
+  check('acp: unsupported client call gets -32601, notifications get no reply, turn ends',
+    fsAnswer?.error?.code === -32601 && !got.some(m => m.id === undefined && m.method === undefined) && res?.stopReason === 'end_turn', JSON.stringify(got));
+
+  // a missing or made-up permission answer is "cancelled", never a guessed allow
+  for (const [name, pick] of [['null', null], ['unknown id', 'not-offered'], ['throws', 'THROW']]) {
+    fs.rmSync(logFile, { force: true });
+    const s = await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env(''), onPermission: async () => { if (pick === 'THROW') throw new Error('x'); return pick; } });
+    await s.agent.prompt('x');
+    s.agent.stop();
+    const ans = readLog().find(m => m.id === 1000);
+    check('acp: permission ' + name + ' answers cancelled', ans?.result?.outcome?.outcome === 'cancelled', JSON.stringify(ans));
+  }
+
+  // auth_required: sign in through authenticate, then the session opens
+  fs.rmSync(logFile, { force: true });
+  let offered = null;
+  const signed = await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env('auth'), chooseAuth: async m => { offered = m; return m[0]; } });
+  signed.agent.stop();
+  const authLog = readLog().map(m => m.method).filter(Boolean);
+  check('acp: auth_required leads to authenticate with the advertised id, then session/new works',
+    signed.agent.sessionId === 'sess_fake_1' && offered?.[0]?.id === 'fake-login'
+      && JSON.stringify(authLog) === JSON.stringify(['initialize', 'session/new', 'authenticate', 'session/new'])
+      && readLog().find(m => m.method === 'authenticate').params.methodId === 'fake-login', JSON.stringify(readLog()));
+
+  // nobody to sign in: a clear error that keeps the code and the offered methods
+  let authErr = null;
+  try { await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env('auth') }); } catch (e) { authErr = e; }
+  check('acp: no way to sign in gives auth_required with the methods named',
+    authErr?.code === acp.AUTH_REQUIRED && authErr.message.includes('sign in') && authErr.message.includes('Fake login'), String(authErr?.message));
+
+  // a newer protocol version is refused instead of misread
+  let verErr = null;
+  try { await acp.connect({ command: process.execPath, args: [FAKE], cwd: TMP, env: env('v2') }); } catch (e) { verErr = e; }
+  check('acp: an agent on another protocol version is refused clearly', /version 2/.test(String(verErr?.message)), String(verErr?.message));
+
+  // a command that does not exist fails fast with a readable error
+  let spawnErr = null;
+  try { await acp.connect({ command: 'ineed-no-such-agent-xyz', cwd: TMP }); } catch (e) { spawnErr = e; }
+  check('acp: missing agent binary is a readable error, not a hang', /ineed-no-such-agent-xyz|exited|cannot start/.test(String(spawnErr?.message)), String(spawnErr?.message));
+}
+
+// ── ACP through the CLI: list, unknown, missing, and a real task through a fake "opencode" on PATH ──
+{
+  const { code, out } = await run(['acp']);
+  check('cli acp: lists the agents and how to run one', code === 0 && out.includes('antigravity') && out.includes('opencode') && out.includes('ineed acp '), out);
+}
+{
+  const { code, out } = await run(['acp', 'nope']);
+  check('cli acp: unknown agent names the known ones', code === 1 && out.includes('No agent named') && out.includes('antigravity'), out);
+}
+if (process.platform !== 'win32') {
+  const bin = fs.mkdtempSync(path.join(TMP, 'acpbin-'));
+  const empty = fs.mkdtempSync(path.join(TMP, 'acpempty-'));
+  const nodeDir = path.dirname(process.execPath);
+  {
+    const { code, out } = await run(['acp', 'goose', 'hi'], { env: { PATH: empty + path.delimiter + nodeDir, HOME: empty } });
+    check('cli acp: missing agent says how to install and sign in', code === 1 && out.includes('not installed') && out.includes('sign in once'), out);
+  }
+  fs.writeFileSync(path.join(bin, 'opencode'), '#!/bin/sh\nexec "' + process.execPath + '" "' + path.join(ROOT, 'test', 'fixtures', 'fake-acp.mjs') + '"\n', { mode: 0o755 });
+  const logFile = path.join(TMP, 'acp-cli-log.jsonl');
+  fs.mkdirSync(CFG, { recursive: true });
+  const cfgWith = perm => fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: SECRET, model: 'm', permEdit: perm, permShell: perm }), { mode: 0o600 });
+  cfgWith('ask');
+  {
+    const { code, out } = await run(['acp', 'opencode', 'do', 'the', 'thing'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
+    check('cli acp: one task streams the reply; piped input refuses the edit instead of allowing it',
+      code === 0 && out.includes('ECHO:do the thing') && out.includes('PERM:no-once') && out.includes('no API key needed'), out);
+  }
+  cfgWith('allow');
+  {
+    const { code, out } = await run(['acp', 'opencode', 'go'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
+    check('cli acp: permissions set to allow in /config answer allow_always', code === 0 && out.includes('PERM:ok-always'), out);
+  }
+  {
+    const { code, out } = await run(['acp', 'opencode'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile } });
+    check('cli acp: chat without a terminal asks for a task instead of hanging', code === 1 && out.includes('ineed acp opencode'), out);
+  }
+  fs.rmSync(path.join(CFG, 'config.json'), { force: true });
+}
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
