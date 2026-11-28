@@ -11,6 +11,7 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
   let busy = false;
   let queued = 0;
   let tail = Promise.resolve();
+  let current = null;
   const listeners = new Set();
   const emit = event => {
     onEvent(event);
@@ -27,6 +28,8 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
       emit({ type: 'started', text: task });
       try {
         const r = await runObjective(cfg, task, cwd, [], {
+          onRunStart: c => { current = c; },
+          onRunEnd: () => { current = null; },
           onNote: note => emit({ type: 'note', text: String(note) }),
           onTool: name => emit({ type: 'tool', name }),
           onText: t => emit({ type: 'text', text: String(t) }),
@@ -35,8 +38,11 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
         emit({ type: 'done', text: r.answer ?? '', changed: r.changed ?? [], aborted: Boolean(r.aborted) });
         return r;
       } catch (err) {
-        emit({ type: 'error', text: String(err?.message ?? err) });
-        return { answer: 'Error: ' + String(err?.message ?? err), changed: [] };
+        // a task can fail after it already wrote files or ran commands: say what
+        // it managed to do, so a retry does not silently repeat that work
+        const changed = err?.partial?.changed ?? [];
+        emit({ type: 'error', text: String(err?.message ?? err), changed, partial: true });
+        return { answer: 'Error: ' + String(err?.message ?? err), changed, partial: true };
       } finally {
         busy = false;
       }
@@ -46,7 +52,14 @@ export function createHost(cfg, { cwd, onEvent = () => {} } = {}) {
     return run;
   };
 
-  return { submit, subscribe, status: () => ({ busy, queued, cwd, model: cfg?.model ?? '' }) };
+  // Ctrl+C during a remote task must stop the work, not just this process: a
+  // shell command runs in its own process group and would keep going otherwise
+  const stop = async (waitMs = 10_000) => {
+    try { current?.abort?.(); } catch {}
+    await Promise.race([tail.catch(() => {}), new Promise(r => setTimeout(r, waitMs))]);
+  };
+
+  return { submit, subscribe, stop, status: () => ({ busy, queued, cwd, model: cfg?.model ?? '' }) };
 }
 
 // ── HTTP: how an app (a phone, a small web UI) talks to a running ineed ──
@@ -59,10 +72,20 @@ const json = (res, code, body) => {
 export function startHttp(host, { port = 7777, token = '', hostname = '127.0.0.1' } = {}) {
   const listeners = new Set();   // one unsubscribe per open event stream
 
+  // A tokenless server still must not take work from a web page someone has
+  // open: a browser sends Origin (and a non-JSON content type sails through a
+  // CORS preflight), so both are refused. curl, apps and scripts send neither.
+  const fromBrowser = req => Boolean(req.headers.origin) || !/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''));
+
   const allowed = req => {
-    if (!token) return true;
+    if (!token) return !fromBrowser(req);
     const auth = String(req.headers.authorization ?? '');
     return auth === 'Bearer ' + token;
+  };
+
+  const hostAllowed = req => {
+    const name = String(req.headers.host ?? '').replace(/:\d+$/, '');
+    return !name || ['127.0.0.1', 'localhost', '[::1]'].includes(name);
   };
 
   const server = http.createServer((req, res) => {
@@ -70,7 +93,8 @@ export function startHttp(host, { port = 7777, token = '', hostname = '127.0.0.1
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, { ok: true, version: 1, ...host.status() });
     }
-    if (!allowed(req)) return json(res, 401, { ok: false, error: 'missing or wrong token' });
+    if (!hostAllowed(req)) return json(res, 421, { ok: false, error: 'wrong host' });
+    if (!allowed(req)) return json(res, 401, { ok: false, error: token ? 'missing or wrong token' : 'this call did not come from a local app: send JSON without a browser Origin, or start the server with --token' });
 
     if (req.method === 'GET' && url.pathname === '/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
@@ -165,7 +189,9 @@ export async function startTelegram(host, { token, chats = [], apiBase = process
     const text = String(msg?.text ?? '').trim();
     const chatId = String(msg?.chat?.id ?? '');
     if (!text || !chatId) return;
-    if (allow.length && !allow.includes(chatId)) {
+    // an empty allowlist allows nobody: a bot that answers every stranger runs
+    // shell commands for them
+    if (!allow.includes(chatId)) {
       return reply(chatId, `This chat (id ${chatId}) is not allowed yet. Add it to telegramChats to use ineed here.`);
     }
     if (/^\/(start|help)\b/.test(text)) return reply(chatId, TELEGRAM_TEXT);
@@ -175,12 +201,15 @@ export async function startTelegram(host, { token, chats = [], apiBase = process
     }
     if (/^\/stop\b/.test(text)) return reply(chatId, 'Use the terminal to stop a running task; this chat cannot interrupt it.');
     await reply(chatId, 'Working on it: ' + text.slice(0, 200));
-    const r = await host.submit(text);
-    const body = String(r.answer ?? '').trim() || (r.aborted ? 'Stopped.' : 'Done.');
-    const changed = Array.isArray(r.changed) && r.changed.length ? '\n\nchanged: ' + r.changed.slice(0, 12).join(', ') : '';
-    // plain text only: bot output can contain anything the model wrote, and
-    // markdown or HTML parsing would turn that into a broken or spoofed message
-    await reply(chatId, `> ${text.slice(0, 200)}\n\n${body}${changed}`);
+    // the queue serializes the work; this loop must keep reading updates while
+    // it runs, or /status and other chats would wait for the task to finish
+    host.submit(text).then(async r => {
+      const body = String(r.answer ?? '').trim() || (r.aborted ? 'Stopped.' : 'Done.');
+      const changed = Array.isArray(r.changed) && r.changed.length ? '\n\n' + (r.partial ? 'changed before the error: ' : 'changed: ') + r.changed.slice(0, 12).join(', ') : '';
+      // plain text only: model output can contain anything, and markdown or HTML
+      // parsing would turn that into a broken or spoofed message
+      await reply(chatId, `> ${text.slice(0, 200)}\n\n${body}${changed}`).catch(() => {});
+    }).catch(() => {});
   };
 
   (async () => {

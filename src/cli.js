@@ -124,9 +124,15 @@ if (args[0] === 'serve' || args[0] === 'telegram') {
   }
   const { createHost, startHttp, startTelegram } = await import('./serve.js');
   const host = createHost(cfg, { cwd });
+  let stopping = false;
   const stopOnSignal = () => {
-    console.log(dim('\nStopped.'));
-    process.exit(0);
+    if (stopping) return;
+    stopping = true;
+    console.log(dim('\nStopping: waiting for the current task to end...'));
+    host.stop().finally(() => {
+      console.log(dim('Stopped.'));
+      process.exit(0);
+    });
   };
   process.on('SIGINT', stopOnSignal);
   process.on('SIGTERM', stopOnSignal);

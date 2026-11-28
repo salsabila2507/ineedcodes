@@ -1215,6 +1215,15 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
     health.ok === true && health.cwd === work && health.model === 'mock-mini' && health.busy === false, JSON.stringify(health));
   const denied = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"hi"}' });
   check('serve: /task without the token is refused', denied.status === 401);
+  const browser = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'text/plain', origin: 'https://evil.example' }, body: '{"text":"rm -rf ~"}' });
+  check('serve: a request a web page could forge is refused even with the token', browser.status === 401);
+  const open = await startHttp(host, { port: 0 });
+  const openBase = 'http://127.0.0.1:' + open.port;
+  const forged = await fetch(openBase + '/task', { method: 'POST', headers: { 'content-type': 'text/plain', origin: 'https://evil.example' }, body: '{"text":"rm -rf ~"}' });
+  const localApp = await fetch(openBase + '/task', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"say hi"}' });
+  check('serve: a tokenless server takes plain local JSON but refuses a page-forged POST',
+    forged.status === 401 && localApp.status === 202, forged.status + '/' + localApp.status);
+  await open.close();
   const sse = await fetch(base + '/events', { headers: { authorization: 'Bearer t0k' } });
   const reader = sse.body.getReader();
   const accepted = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer t0k' }, body: JSON.stringify({ text: 'create hello.txt' }) });
@@ -1277,12 +1286,12 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
     });
   });
   await new Promise(r => quietBot.listen(0, '127.0.0.1', r));
-  const guard = await startTelegram(quiet, { token: 'tok', chats: ['99'], apiBase: 'http://127.0.0.1:' + quietBot.address().port });
+  const guard = await startTelegram(quiet, { token: 'tok', chats: [], apiBase: 'http://127.0.0.1:' + quietBot.address().port });
   const until = Date.now() + 10_000;
   while (Date.now() < until && !seen.length) await new Promise(r => setTimeout(r, 100));
   guard.stop();
   quietBot.close();
-  check('telegram: a chat that is not on the allowlist is told its id instead of running anything',
+  check('telegram: an empty allowlist refuses every chat, including its own id',
     seen.length > 0 && seen.every(s => /not allowed/.test(s)) && fs.readdirSync(idle).length === 0, seen.join(' ').slice(0, 300));
   mockServer.close();
 }
