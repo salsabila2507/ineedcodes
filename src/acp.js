@@ -20,7 +20,7 @@ const WIN = process.platform === 'win32';
 // binary without always adding it to PATH.
 export const AGENTS = [
   {
-    id: 'antigravity', name: 'Antigravity', commands: ['agy'], args: ['acp'],
+    id: 'antigravity', name: 'Antigravity', short: 'agy', commands: ['agy'], args: ['acp'],
     why: 'Google, free plan',
     install: 'curl -fsSL https://antigravity.google/cli/install.sh | bash   (Windows: irm https://antigravity.google/cli/install.ps1 | iex)',
     login: 'agy acp --login',
@@ -28,16 +28,16 @@ export const AGENTS = [
     // Google allows agy acp only while a person drives the session: never from serve, telegram or scripts
     personOnly: true
   },
-  { id: 'opencode', name: 'OpenCode', commands: ['opencode'], args: ['acp'], why: 'free models', install: 'npm install -g opencode-ai', login: 'opencode auth login' },
-  { id: 'goose', name: 'Goose', commands: ['goose'], args: ['acp'], why: 'Block', install: 'see https://goose-docs.ai', login: 'goose configure' },
-  { id: 'qwen', name: 'Qwen Code', commands: ['qwen'], args: ['--acp'], why: 'Qwen', install: 'npm install -g @qwen-code/qwen-code', login: 'qwen' },
-  { id: 'claude', name: 'Claude Code', commands: ['claude-agent-acp', 'claude-code-acp'], args: [], why: 'Claude plan', install: 'npm install -g @agentclientprotocol/claude-agent-acp', login: 'claude   (then /login)' },
-  { id: 'codex', name: 'Codex', commands: ['codex-acp'], args: [], why: 'ChatGPT plan', install: 'npm install -g @agentclientprotocol/codex-acp', login: 'codex login' }
+  { id: 'opencode', name: 'OpenCode', short: 'oc', commands: ['opencode'], args: ['acp'], why: 'free models', install: 'npm install -g opencode-ai', login: 'opencode auth login' },
+  { id: 'goose', name: 'Goose', short: 'gs', commands: ['goose'], args: ['acp'], why: 'Block', install: 'see https://goose-docs.ai', login: 'goose configure' },
+  { id: 'qwen', name: 'Qwen Code', short: 'qw', commands: ['qwen'], args: ['--acp'], why: 'Qwen', install: 'npm install -g @qwen-code/qwen-code', login: 'qwen' },
+  { id: 'claude', name: 'Claude Code', short: 'cc', commands: ['claude-agent-acp', 'claude-code-acp'], args: [], why: 'Claude plan', install: 'npm install -g @agentclientprotocol/claude-agent-acp', login: 'claude   (then /login)' },
+  { id: 'codex', name: 'Codex', short: 'cx', commands: ['codex-acp'], args: [], why: 'ChatGPT plan', install: 'npm install -g @agentclientprotocol/codex-acp', login: 'codex login' }
 ];
 
 export function findAgent(id) {
   const key = String(id ?? '').toLowerCase();
-  return AGENTS.find(a => a.id === key || a.name.toLowerCase() === key) ?? null;
+  return AGENTS.find(a => a.id === key || a.short === key || a.name.toLowerCase() === key) ?? null;
 }
 
 const onPath = command => spawnSync(WIN ? 'where' : 'which', [command], { stdio: 'ignore' }).status === 0;

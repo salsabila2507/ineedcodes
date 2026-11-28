@@ -180,10 +180,10 @@ if (args[0] === 'acp') {
   if (!agentArg || agentArg === 'list') {
     console.log(bold('Agents ineed can drive') + dim('  no API key, the agent keeps its own sign-in'));
     for (const a of list) {
-      console.log('  ' + (a.found ? green('✓') : dim('·')) + ' ' + bold(a.id.padEnd(12))
-        + dim(a.found ? a.why : 'not installed'));
+      console.log('  ' + (a.found ? green('✓') : dim('·')) + ' ' + bold(a.short.padEnd(4))
+        + dim(a.id.padEnd(12)) + dim(a.found ? a.why : 'not installed'));
     }
-    const first = list.find(a => a.found)?.id ?? 'opencode';
+    const first = list.find(a => a.found)?.short ?? 'oc';
     console.log('');
     console.log(dim('  one task: ') + green('ineed acp ' + first + ' "fix the failing tests"'));
     console.log(dim('  chat:     ') + green('ineed acp ' + first));
@@ -210,7 +210,6 @@ if (args[0] === 'acp') {
     console.error(dim('  Google suspends accounts used through automation. Use another agent (for example opencode) for scripts.'));
     process.exit(1);
   }
-  if (agent.personOnly) console.log(yellow('  ' + agent.name + ': only with you driving it, never from scripts.'));
   let rl = null, ask = null;
   const readline = await import('node:readline');
   const { makeInput } = await import('./ui.js');
@@ -243,7 +242,9 @@ if (args[0] === 'acp') {
   // a tool line must not spend the whole width on a path: drop this folder's
   // prefix, keep ~ short, and clamp to the terminal so nothing wraps
   const tidy = line => {
-    const text = String(line).split(acpCwd + path.sep).join('').split(os.homedir()).join('~');
+    const home = os.homedir();
+    let text = String(line).split(acpCwd + path.sep).join('');
+    if (home && home !== path.sep) text = text.split(home).join('~');
     const width = Math.max(20, (process.stdout.columns || 80) - 2);
     return text.length <= width ? text : text.slice(0, width - 1) + '…';
   };
@@ -263,7 +264,6 @@ if (args[0] === 'acp') {
     return methods[Number(reply) - 1] ?? null;
   };
   const oneShot = args.slice(2).join(' ').trim();
-  console.log(dim('  ' + agent.name + ' · no API key'));
   let session = null;
   let busy = false;
   const cancelTurn = () => {
@@ -297,10 +297,9 @@ if (args[0] === 'acp') {
       console.error(red('  Give a task: ') + 'ineed acp ' + agent.id + ' "<task>"' + dim('  (chat needs a terminal)'));
       process.exitCode = 1;
     } else {
-      console.log(dim('  A task, or /exit. One session, so it remembers.'));
       for (;;) {
         let text;
-        try { text = (await ask(cyan('›'), { onEof: '/exit' })).trim(); } catch { text = '/exit'; }
+        try { text = (await ask(dim(agent.short + ' ›'), { onEof: '/exit' })).trim(); } catch { text = '/exit'; }
         if (!text) continue;
         if (['/exit', '/quit', 'exit', 'quit', 'keluar'].includes(text.toLowerCase())) break;
         await send(text);

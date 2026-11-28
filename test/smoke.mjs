@@ -2344,10 +2344,12 @@ if (process.platform !== 'win32') {
   const cfgWith = perm => fs.writeFileSync(path.join(CFG, 'config.json'), JSON.stringify({ baseUrl: 'http://127.0.0.1:1/v1', apiKey: SECRET, model: 'm', permEdit: perm, permShell: perm }), { mode: 0o600 });
   cfgWith('ask');
   {
-    const { code, out } = await run(['acp', 'opencode', 'do', 'the', 'thing'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile, FAKE_ACP_TOOL_TITLE: path.join(TMP, 'sub', 'notes.txt') } });
+    // macOS puts temp folders under a symlink, and the child reports the resolved one
+    const realTmp = fs.realpathSync(TMP);
+    const { code, out } = await run(['acp', 'opencode', 'do', 'the', 'thing'], { fakePath: bin, env: { FAKE_ACP_LOG: logFile, FAKE_ACP_TOOL_TITLE: path.join(realTmp, 'sub', 'notes.txt') } });
     check('cli acp: one task streams the reply; piped input refuses the edit instead of allowing it',
-      code === 0 && out.includes('ECHO:do the thing') && out.includes('PERM:no-once') && out.includes('no API key')
-        && out.includes('sub/notes.txt') && !out.includes(TMP), out);
+      code === 0 && out.includes('ECHO:do the thing') && out.includes('PERM:no-once')
+        && out.includes('sub/notes.txt') && !out.includes(realTmp) && !out.includes(TMP), out);
   }
   cfgWith('allow');
   {
