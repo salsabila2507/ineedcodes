@@ -139,6 +139,18 @@ export async function fetchModels(cfg, signal) {
   return list;
 }
 
+// "modelSuffix": show only models whose id ends with one of these
+// comma-separated endings, so a gateway with hundreds of models stays short
+export function modelSuffixes(value) {
+  return String(value ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+export function filterModels(ids, suffix) {
+  const endings = modelSuffixes(suffix);
+  if (!endings.length) return ids;
+  return ids.filter(id => endings.some(e => String(id).toLowerCase().endsWith(e)));
+}
+
 // human guidance for the status codes a hosted gateway actually returns
 function httpHint(status, text = '') {
   const s = String(text).toLowerCase();

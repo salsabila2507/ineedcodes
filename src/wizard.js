@@ -1,8 +1,8 @@
 // wizard.js: first open. Bring-your-own-key: pick a normal provider (or paste any
 // OpenAI-compatible base URL), enter your key, then choose a real model. Saved once.
 
-import { fetchModels, chat, normalizeContent } from './provider.js';
-import { saveConfig } from './config.js';
+import { fetchModels, filterModels, chat, normalizeContent } from './provider.js';
+import { loadConfig, saveConfig } from './config.js';
 import { aliasFor } from './builtin.js';
 import { bold, dim, red, yellow, green, trunc, logo, BANNER, startSpinner } from './ui.js';
 import { canPickInteractive, pickInteractive, takeKeys } from './picker.js';
@@ -72,7 +72,10 @@ async function pickModelInteractive(models, initialId) {
   return r.value ? String(r.value) : '';
 }
 
-export async function wizard(ask, { fromCommand = false, save = true } = {}) {
+export async function wizard(ask, { fromCommand = false, save = true, modelSuffix = (loadConfig() ?? {}).modelSuffix ?? '' } = {}) {
+  // the saved model-list filter decides what this wizard shows, never what counts
+  // as a valid model: a typed id is still accepted as-is
+  const shownModels = list => filterModels(list, modelSuffix);
   const inputEnded = () => process.stdin.readableEnded === true && !process.stdout.isTTY;
   const abortIfEnded = () => { if (inputEnded()) throw Object.assign(new Error('Setup aborted: input ended.'), { aborted: true }); };
 
@@ -150,7 +153,8 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
   }
   connSpin.stop();
   if (models.length > 0) {
-    console.log(green(`   Connected. ${models.length} models available.`)
+    console.log(green(`   Connected. ${shownModels(models).length} models available.`)
+      + (modelSuffix && shownModels(models).length !== models.length ? dim(`  (names ending with ${modelSuffix})`) : '')
       + (modelAlias ? dim(`  shown as ${modelAlias}/*`) : ''));
   } else if (connErr) {
     // say what actually failed: a beginner must not be told "Connected" and
@@ -161,14 +165,16 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     console.log(yellow('   Connected, but the server did not return a model list (many routers hide it).'));
   }
 
-  const suggest = models.find(m => /gpt-4o-mini/i.test(m))
-    ?? models.find(m => /flash/i.test(m))
-    ?? models.find(m => /mini|fast|small/i.test(m))
-    ?? models[0];
+  const preferred = shownModels(models);
+  const suggest = preferred.find(m => /gpt-4o-mini/i.test(m))
+    ?? preferred.find(m => /flash/i.test(m))
+    ?? preferred.find(m => /mini|fast|small/i.test(m))
+    ?? preferred[0];
   // [m] during the test: the list again on a terminal, a typed id otherwise
   const askModel = async current => {
-    if (models.length > 1 && canPickInteractive()) {
-      const picked = await pickModelInteractive(models, current);
+    const shown = shownModels(models);
+    if (shown.length > 1 && canPickInteractive()) {
+      const picked = await pickModelInteractive(shown, current);
       if (picked && rejectCommand(picked)) return picked;
     }
     const m = await ask('   Model id: ');
@@ -176,9 +182,9 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
     return m && rejectCommand(m) ? m : current;
   };
   let model = '';
-  if (models.length > 1 && canPickInteractive()) {
-    console.log(bold('3. Pick a model') + dim(` (${models.length} available · Esc to type an id)`));
-    const picked = await pickModelInteractive(models, suggest);
+  if (shownModels(models).length > 1 && canPickInteractive()) {
+    console.log(bold('3. Pick a model') + dim(` (${shownModels(models).length} available · Esc to type an id)`));
+    const picked = await pickModelInteractive(shownModels(models), suggest);
     if (picked && rejectCommand(picked)) model = picked;
     if (model) console.log('   Model: ' + model);
   }
@@ -232,13 +238,15 @@ export async function wizard(ask, { fromCommand = false, save = true } = {}) {
         try {
           const list = await fetchModels({ baseUrl, apiKey, model: 'x' });
           if (list.length === 0) { console.log(yellow('   The server sent no list. Use [m] to type an id.')); continue; }
+          const available = shownModels(list);
+          if (available.length === 0) { console.log(yellow(`   No model name ends with "${modelSuffix}". Use [m] to type an id.`)); continue; }
           if (canPickInteractive()) {
-            console.log(dim(`   ${list.length} models available:`));
-            const picked = await pickModelInteractive(list, model);
+            console.log(dim(`   ${available.length} models available:`));
+            const picked = await pickModelInteractive(available, model);
             if (picked && rejectCommand(picked)) model = picked;
           } else {
-            const show = list.slice(0, 15);
-            console.log(dim(`   ${list.length} models available, showing ${show.length}:`));
+            const show = available.slice(0, 15);
+            console.log(dim(`   ${available.length} models available, showing ${show.length}:`));
             show.forEach((m, i) => console.log('   ' + (i + 1) + '. ' + m));
             const pick = await ask('   Number or full model id: ');
             if (pick === '') abortIfEnded();

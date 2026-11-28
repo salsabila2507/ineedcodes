@@ -126,7 +126,8 @@ The agent decides what it needs: list files, read code, search, edit, run shell 
 | `/mcp` | list MCP servers and their tools |
 | `/setup` | reconfigure the active provider (keeps the others) |
 | `/menu` | everything you can do in one list, picked with the arrow keys (or just type `menu`) |
-| `/config` | settings menu in plain language: permissions, work mode, answer length, memory, natural wording, thinking effort, theme, model (also `pengaturan`) |
+| `/config` | settings menu in plain language: permissions, work mode, answer length, memory, natural wording, thinking effort, theme, model, model list filter (also `pengaturan`) |
+| `/config models <ending>` | show only models whose name ends with `<ending>` (comma-separate several, `off` shows all again) |
 | `/status` | what is active right now: model, provider, permissions, token use |
 | `/depth` | answer length: `/depth short\|normal\|deep` |
 | `/humanizer` | natural wording pass for html/md copy, on or off |

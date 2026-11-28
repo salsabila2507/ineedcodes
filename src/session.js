@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { clearConfig, normalize, saveConfig, addProvider, removeProvider, providerNames } from './config.js';
 import { switchProviderLive, isUnreachable, usesBuiltinGateway, recoveryPrompt } from './switch.js';
 import { runObjective, pushTurn, MAX_STEPS } from './agent.js';
-import { fetchModels } from './provider.js';
+import { fetchModels, filterModels } from './provider.js';
 import { makeInput, bold, dim, red, green, yellow, cyan, gray, trunc, BANNER, logo, startSpinner, VERSION, userBlock, T, setTheme, getTheme, themeNames, bgOn, fgOn, fgOff, resetOff, screen, visLen, cpWidth } from './ui.js';
 import { wizard } from './wizard.js';
 import { canPickInteractive, pickInteractive } from './picker.js';
@@ -484,6 +484,22 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
     return options[n - 1].value;
   }
 
+  function applyModelSuffix(value) {
+    Object.assign(state, normalize({ ...state, modelSuffix: value }));
+    try { saveConfig(state); } catch {}
+    say(green('  ✓ ') + T.text(state.modelSuffix
+      ? 'model list: only names ending with "' + state.modelSuffix + '"'
+      : 'model list: all models') + T.muted('  pick one now: /model'));
+  }
+
+  async function setModelSuffix() {
+    say(T.muted('   Too many models? Keep only the ones whose name ends with a few letters, like ') + T.text('-free') + T.muted(' or ') + T.text(':cloud') + T.muted('.'));
+    say(T.muted('   Several endings: separate them with commas. Empty = keep as it is, "off" = show all models again.'));
+    const v = (await ask('   Show only models ending with: ')).trim();
+    if (!v) return;
+    applyModelSuffix(/^(off|all|none|-)$/i.test(v) ? '' : v);
+  }
+
   async function pickModel() {
     let models = [];
     const op = new AbortController();
@@ -501,13 +517,19 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       say(yellow('   Server sent no list. Change model by editing ~/.ineedcodes/config.json'));
       return;
     }
-    // full list: the picker scrolls, so nothing is hidden beyond a fixed slice
-    const list = models;
+    // the server's full catalog stays the truth (a saved model is valid even when
+    // the filter hides it); the filter only decides what is shown here. The
+    // picker scrolls, so nothing is hidden beyond a fixed slice
+    const list = filterModels(models, state.modelSuffix);
+    if (list.length === 0) {
+      say(yellow(`   No model name ends with "${state.modelSuffix}".`) + T.muted(' Change or clear the filter: /config models <ending>, or /config models off'));
+      return;
+    }
     // last working model first, so a 403 "deposit required" recovery is one enter away
     const ordered = state.lastGood && list.includes(state.lastGood)
       ? [state.lastGood, ...list.filter(m => m !== state.lastGood)]
       : list;
-    say(dim(`   ${list.length} models available.` + (state.lastGood && ordered[0] === state.lastGood ? ' last working is first.' : '')));
+    say(dim(`   ${list.length} models available` + (state.modelSuffix ? ` ending with "${state.modelSuffix}".` : '.') + (state.lastGood && ordered[0] === state.lastGood ? ' last working is first.' : '')));
     let chosen = null;
     if (TUI) {
       const idx = await pickFromList(ordered);
@@ -1040,7 +1062,8 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
           apply: v => save({ reasoning: v }, 'thinking: ' + (v === 'high' ? 'deeper' : 'normal'))
         },
         { label: 'Color theme', current: getTheme(), run: () => commands['/theme']('') },
-        { label: 'Model', current: state.model || '(none)', run: () => pickModel() }
+        { label: 'Model', current: state.model || '(none)', run: () => pickModel() },
+        { label: 'Show only models ending with', current: state.modelSuffix || 'all models', run: () => setModelSuffix() }
       ];
       const change = async s => {
         if (s.run) return s.run();
@@ -1167,6 +1190,11 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
       if (setting === 'net' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permNet: value })); persist(); say(green('  net perm: ' + value)); return; }
       if (setting === 'edit' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permEdit: value })); persist(); say(green('  edit perm: ' + value)); return; }
       if (setting === 'shell' && ['allow', 'ask'].includes(value)) { Object.assign(state, normalize({ ...state, permShell: value })); persist(); say(green('  shell perm: ' + value)); return; }
+      if (setting === 'models' || setting === 'modelsuffix') {
+        const v = parts.slice(1).join(' ').trim();
+        applyModelSuffix(/^(off|all|none|-)$/i.test(v) ? '' : v);
+        return;
+      }
       if (setting === 'searchurl') { Object.assign(state, normalize({ ...state, searchUrl: parts.slice(1).join(' ') })); persist(); say(green('  searchUrl set.')); return; }
       if (setting === 'baseurl' || setting === 'url') {
         const url = parts.slice(1).join(' ').trim();
@@ -1177,7 +1205,7 @@ export async function startSession(cfg, { fresh = false, resume = null } = {}) {
         if (TUI) drawStatus();
         return;
       }
-      say(dim('  Settings: reasoning|depth|memory|humanizer|edit|shell|net|baseurl|searchurl <value> · providers via /provider · model via /model · mode via /plan /build'));
+      say(dim('  Settings: reasoning|depth|memory|humanizer|edit|shell|net|models|baseurl|searchurl <value> · providers via /provider · model via /model · mode via /plan /build'));
       return;
     }
     if (input === '/config-menu') {
