@@ -105,6 +105,10 @@ function mock(script) {
         case 'tools':
           resp = hadTools ? reply('Wrote hello.txt. Evidence above.') : call('write_file', { path: 'hello.txt', content: 'hello from ineed' });
           break;
+        case 'slow':
+          if (!hadTools) resp = call('shell', { command: 'node -e "setTimeout(function(){},2500)"' });
+          else resp = reply('SLOW-DONE');
+          break;
         case 'shell':
           if (!hadTools) resp = call('shell', { command: 'echo ineed-shell-e2e' });
           else resp = reply(joined.includes('ineed-shell-e2e') && joined.includes('exit code: 0') ? 'SHELL-VERIFIED' : 'SHELL-BROKEN');
@@ -1197,6 +1201,131 @@ async function oneShot(script, task, cfgExtra = {}, prep = null, opts = {}) {
   check('models: the setup wizard shows only matching models and says why',
     w.code === 0 && w.out.includes('names ending with mini'), w.out.slice(-700));
   server.close();
+}
+
+// ── remote control: the same task queue behind HTTP and Telegram ──
+{
+  const { createHost, startHttp, startTelegram } = await import('../src/serve.js');
+  const { server: mockServer, port: mockPort } = await mock('default');
+  const { normalize } = await import('../src/config.js');
+  const cfg = normalize({ baseUrl: 'http://127.0.0.1:' + mockPort + '/v1', apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow', mcp: false, memory: false, humanize: false });
+  const work = fs.mkdtempSync(path.join(TMP, 'serve-'));
+  const events = [];
+  const host = createHost(cfg, { cwd: work, onEvent: e => events.push(e.type) });
+  const http1 = await startHttp(host, { port: 0, token: 't0k' });
+  const base = 'http://127.0.0.1:' + http1.port;
+  const health = await fetch(base + '/health').then(r => r.json());
+  check('serve: /health answers without a token and names the folder and model',
+    health.ok === true && health.cwd === work && health.model === 'mock-mini' && health.busy === false, JSON.stringify(health));
+  const denied = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"hi"}' });
+  check('serve: /task without the token is refused', denied.status === 401);
+  const browser = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'text/plain', origin: 'https://evil.example' }, body: '{"text":"rm -rf ~"}' });
+  check('serve: a request a web page could forge is refused even with the token', browser.status === 401);
+  const open = await startHttp(host, { port: 0 });
+  const openBase = 'http://127.0.0.1:' + open.port;
+  const forged = await fetch(openBase + '/task', { method: 'POST', headers: { 'content-type': 'text/plain', origin: 'https://evil.example' }, body: '{"text":"rm -rf ~"}' });
+  const localApp = await fetch(openBase + '/task', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"text":"say hi"}' });
+  check('serve: a tokenless server takes plain local JSON but refuses a page-forged POST',
+    forged.status === 401 && localApp.status === 202, forged.status + '/' + localApp.status);
+  const noTokenEvents = await fetch(openBase + '/events', { signal: AbortSignal.timeout(2000) }).then(r => r.status).catch(() => 0);
+  check('serve: a tokenless event stream still opens for a local client', noTokenEvents === 200, String(noTokenEvents));
+  const rebind = await new Promise(done => {
+    const r = http.request({ host: '127.0.0.1', port: open.port, path: '/health', headers: { host: 'evil.example' } }, res => { res.resume(); done(res.statusCode); });
+    r.on('error', () => done(0));
+    r.end();
+  });
+  check('serve: /health refuses a foreign Host header too', rebind === 421, String(rebind));
+  await open.close();
+  const sse = await fetch(base + '/events', { headers: { authorization: 'Bearer t0k' } });
+  const reader = sse.body.getReader();
+  const accepted = await fetch(base + '/task', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer t0k' }, body: JSON.stringify({ text: 'create hello.txt' }) });
+  let streamed = '';
+  const dec = new TextDecoder();
+  const readUntil = async (marker, ms) => {
+    const until = Date.now() + ms;
+    while (!streamed.includes(marker) && Date.now() < until) {
+      const { value, done } = await reader.read();
+      if (done) { streamed += '[CLOSED]'; break; }
+      streamed += dec.decode(value);
+    }
+  };
+  const streamWait = readUntil('event: done', 60_000);
+  await streamWait;
+  reader.cancel().catch(() => {});
+  check('serve: a task from the API runs in the folder and streams events back',
+    accepted.status === 202 && streamed.includes('event: started') && streamed.includes('event: done') && /"text":"OK"/.test(streamed), streamed.slice(-400));
+  await http1.close();
+  check('serve: events reach plain listeners too', events.includes('started') && events.includes('done'), events.join(','));
+
+  // Telegram: a fake Bot API in front of the same queue
+  const calls = [];
+  let served = false;
+  const bot = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      const method = (req.url ?? '').split('/').pop();
+      calls.push([method, body]);
+      const send = obj => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (method === 'getUpdates') {
+        if (served) return setTimeout(() => send({ ok: true, result: [] }), 50);
+        served = true;
+        return send({ ok: true, result: [{ update_id: 7, message: { chat: { id: 42 }, text: 'create hello.txt' } }] });
+      }
+      return send({ ok: true, result: {} });
+    });
+  });
+  await new Promise(r => bot.listen(0, '127.0.0.1', r));
+  const botBase = 'http://127.0.0.1:' + bot.address().port;
+  const tg = await startTelegram(host, { token: 'tok', chats: ['42'], apiBase: botBase });
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline && !calls.some(c => c[0] === "sendMessage" && /OK/.test(c[1]))) await new Promise(r => setTimeout(r, 100));
+  tg.stop();
+  bot.close();
+  const sent = calls.filter(c => c[0] === 'sendMessage').map(c => JSON.parse(c[1]));
+  check('telegram: a message from an allowed chat runs the task and the answer comes back',
+    sent.some(m => String(m.chat_id) === '42' && /OK/.test(String(m.text ?? ''))) && sent.some(m => /Working on it/.test(String(m.text ?? ''))), JSON.stringify(sent).slice(0, 400));
+  const idle = fs.mkdtempSync(path.join(TMP, 'serve-idle-'));
+  const quiet = createHost(cfg, { cwd: idle, onEvent: () => {} });
+  const seen = [];
+  const quietBot = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      if (req.url.includes('sendMessage')) seen.push(body);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, result: req.url.includes('getUpdates') && seen.length === 0 ? [{ update_id: 1, message: { chat: { id: 7 }, text: 'halo' } }] : [] }));
+    });
+  });
+  await new Promise(r => quietBot.listen(0, '127.0.0.1', r));
+  const guard = await startTelegram(quiet, { token: 'tok', chats: [], apiBase: 'http://127.0.0.1:' + quietBot.address().port });
+  const until = Date.now() + 10_000;
+  while (Date.now() < until && !seen.length) await new Promise(r => setTimeout(r, 100));
+  guard.stop();
+  quietBot.close();
+  check('telegram: an empty allowlist refuses every chat, including its own id',
+    seen.length > 0 && seen.every(s => /not allowed/.test(s)) && fs.readdirSync(idle).length === 0, seen.join(' ').slice(0, 300));
+
+  // shutdown: the running task is aborted, and queued work never starts
+  const { server: slowServer, port: slowPort } = await mock('slow');
+  const slowCfg = normalize({ baseUrl: 'http://127.0.0.1:' + slowPort + '/v1', apiKey: SECRET, model: 'mock-mini', permEdit: 'allow', permShell: 'allow', mcp: false, memory: false, humanize: false });
+  const slowEvents = [];
+  const slowHost = createHost(slowCfg, { cwd: fs.mkdtempSync(path.join(TMP, 'serve-stop-')), onEvent: e => slowEvents.push(e) });
+  const running = slowHost.submit('take your time');
+  const waiting = slowHost.submit('never starts');
+  await new Promise(r => setTimeout(r, 800));
+  await slowHost.stop(20_000);
+  const [firstTask, secondTask] = await Promise.all([running, waiting]);
+  check('serve: shutdown aborts the running task and nothing queued starts',
+    firstTask.aborted === true && /Stopped before it started/.test(secondTask.answer)
+      && !slowEvents.some(e => e.type === 'started' && e.text === 'never starts'),
+    JSON.stringify([firstTask.aborted, secondTask.answer, slowEvents.map(e => e.type)]));
+  slowServer.close();
+  await host.stop(1000);
+  const afterStop = await host.submit('say hi again');
+  check('serve: a task offered after shutdown is refused at once',
+    /Stopped before it started/.test(afterStop.answer), afterStop.answer);
+  mockServer.close();
 }
 
 // ── plain words as commands: no slash needed ──

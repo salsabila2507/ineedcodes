@@ -25,6 +25,10 @@ ${bold('ineed')} ${dim(`v${VERSION}`)} - your terminal, now autonomous
   ${green('ineed')}                        ${dim('open a session, then just talk to it')}
   ${green('ineed "bikin halaman login"')}  ${dim('do one task, then exit')}
 
+  ${bold('Dari luar terminal')}
+  ${green('ineed serve')}                 ${dim('HTTP API lokal untuk aplikasi (POST /task, GET /events)')}
+  ${green('ineed telegram')}              ${dim('bot Telegram: kirim tugas dari chat')}
+
   ${bold('Setup')}
   ${green('ineed provider')}              ${dim('pick a provider by number, switch API/key, add providers')}
   ${green('ineed --reset')}               ${dim('HAPUS semua provider+key, lalu setup ulang')}
@@ -99,6 +103,66 @@ if (args[0] === 'skills-sync') {
   console.log(dim('These skills stay hidden until you set a keyword with ') + bold('ineed unlock') + dim(' and mention it in a task.'));
   console.log(yellow('Optional and opt-in. Use responsibly: only on systems you are authorized to test.'));
   process.exit(0);
+}
+
+// remote control: the same task queue, reachable from an app (HTTP) or a chat
+// (Telegram). Both run in the current folder with the saved provider and model
+if (args[0] === 'serve' || args[0] === 'telegram') {
+  const flag = (name, fallback = '') => {
+    const i = args.indexOf('--' + name);
+    return i > 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : fallback;
+  };
+  const cfg = loadConfig();
+  if (!cfg) {
+    console.error(red('No provider configured yet. Run ') + bold('ineed') + red(' once to set it up.'));
+    process.exit(1);
+  }
+  const cwd = path.resolve(flag('dir', process.cwd()));
+  if (!fs.existsSync(cwd)) {
+    console.error(red('No such folder: ' + cwd));
+    process.exit(1);
+  }
+  const { createHost, startHttp, startTelegram } = await import('./serve.js');
+  const host = createHost(cfg, { cwd });
+  let stopping = false;
+  const stopOnSignal = () => {
+    if (stopping) return;
+    stopping = true;
+    console.log(dim('\nStopping: waiting for the current task to end...'));
+    host.stop().finally(() => {
+      console.log(dim('Stopped.'));
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', stopOnSignal);
+  process.on('SIGTERM', stopOnSignal);
+  const who = cfg.provider ? cfg.provider + ' · ' + cfg.model : cfg.model;
+
+  if (args[0] === 'serve') {
+    const port = Number(flag('port', String(cfg.servePort || 7777))) || 7777;
+    const token = flag('token', cfg.serveToken || process.env.INEED_SERVE_TOKEN || '');
+    const server = await startHttp(host, { port, token });
+    console.log(green('ineed is listening on ') + bold('http://127.0.0.1:' + server.port));
+    console.log(dim('  folder: ' + cwd + '   model: ' + who));
+    console.log(dim('  an app sends work with POST /task {"text": "..."} and follows GET /events'));
+    if (!token) console.log(yellow('  no token set: only this computer can reach it (127.0.0.1). Add --token to require one.'));
+  await new Promise(() => {});
+  }
+
+  const token = flag('token', cfg.telegramToken || process.env.INEED_TELEGRAM_TOKEN || '');
+  const chats = flag('chats', cfg.telegramChats || '').split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await startTelegram(host, { token, chats });
+  } catch (err) {
+    console.error(red(err.message));
+    console.error(dim('  Create a bot with @BotFather, then: ineed telegram --token <token>'));
+    process.exit(1);
+  }
+  console.log(green('ineed is listening for Telegram messages'));
+  console.log(dim('  folder: ' + cwd + '   model: ' + who));
+  console.log(dim(chats.length ? '  chats allowed: ' + chats.join(', ') : '  every chat is refused until you add its id: --chats <id> (the bot replies with the id it saw)'));
+  console.log(yellow('  messages run commands and edit files in this folder without asking. Keep it to chats you trust.'));
+  await new Promise(() => {});
 }
 
 // a gateway that lists several upstreams is shown to the user as one namespace
